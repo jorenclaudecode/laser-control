@@ -1,0 +1,1133 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Laser Control</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%225%22 fill=%22%23e11d48%22/%3E%3C/svg%3E">
+<!--
+  Laser Control - Web Serial controller for small Grbl 1.1 laser engravers (built and tested with a
+  THMG L1 MINI: Grbl 1.1h on an ESP32, CH340 USB). MIT licence - see LICENSE.
+  Run: ./serve.sh (or python3 -m http.server 8766), then open http://localhost:8766 in Edge or Chrome
+  (Web Serial needs Chromium and localhost or https; Safari/Firefox don't support it).
+  Safety model:
+   - The laser can only be switched on while "Laser armed" is on. Arming needs the goggles checkbox.
+   - Power is capped (default 20 %) and the cap must be raised on purpose.
+   - Normal jogging always runs with the laser off ($J= jog commands, M5 first).
+   - "Fire" is hold-to-fire with an automatic 3 s cut-off.
+   - STOP / Esc: jog cancel + feed hold + soft reset (Grbl turns the laser off), then disarm.
+   - Leaving or hiding the page, losing the connection, an ALARM or a Grbl reset all switch the laser off and disarm.
+-->
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--fg:#1a1d22;--mut:#69707d;--line:#e1e4e9;--acc:#2563eb;--acc-fg:#fff;--ok:#15803d;--warn:#b45309;--bad:#c81e1e;--laser:#e11d48;--map:#fafbfc;--grid:#e8ebef;--burn:#e11d48;--head:#2563eb}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0f1115;--card:#171a20;--fg:#e7e9ee;--mut:#8f97a6;--line:#2a2f38;--acc:#6b9bff;--acc-fg:#0b1020;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--laser:#fb7185;--map:#12151a;--grid:#232832;--burn:#fb7185;--head:#6b9bff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:1240px;margin:0 auto;padding:16px 16px 40px}
+header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+h1{font-size:20px;margin:0}
+h2{font-size:14px;margin:0 0 10px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:650}
+.grow{flex:1}
+button,select,input{font:inherit;color:var(--fg)}
+button{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:7px 12px;cursor:pointer;touch-action:manipulation}
+button:hover:not(:disabled){border-color:var(--acc)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.pri{background:var(--acc);border-color:var(--acc);color:var(--acc-fg)}
+input[type=number],input[type=text],select{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:6px 8px;min-width:0}
+input[type=number]{width:84px}
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-weight:650;font-size:13px;border:1px solid var(--line)}
+.b-Idle{color:var(--ok);border-color:var(--ok)}
+.b-Run,.b-Jog,.b-Home{color:var(--acc);border-color:var(--acc)}
+.b-Alarm,.b-Door{color:var(--bad);border-color:var(--bad)}
+.b-Hold{color:var(--warn);border-color:var(--warn)}
+#estop{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:800;letter-spacing:.06em;padding:10px 22px;font-size:15px;border-radius:10px}
+.grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr) minmax(0,1fr);gap:12px}
+@media (max-width:1000px){.grid{grid-template-columns:1fr 1fr}.grid .map-card{grid-column:1/-1}}
+@media (max-width:640px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.row label{color:var(--mut);font-size:13px}
+.pos{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.pos div{background:var(--bg);border-radius:8px;padding:6px 10px}
+.pos b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
+.pos span{color:var(--mut);font-size:12px}
+canvas{width:100%;aspect-ratio:1/1;background:var(--map);border:1px solid var(--line);border-radius:10px;display:block;cursor:crosshair}
+.hint{color:var(--mut);font-size:12.5px;margin:6px 0 0}
+.pad{display:grid;grid-template-columns:repeat(3,64px);grid-template-rows:repeat(3,64px);gap:6px;justify-content:center;margin:6px 0 12px}
+.pad button{font-size:20px;padding:0;border-radius:10px;user-select:none;-webkit-user-select:none}
+.pad .mid{font-size:12px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:6px 10px}
+.seg button.on{background:var(--acc);color:var(--acc-fg)}
+.laser-state{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:var(--bg);margin-bottom:10px;font-weight:600}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--line)}
+.dot.on{background:var(--laser);box-shadow:0 0 0 4px color-mix(in srgb,var(--laser) 25%,transparent)}
+.armed .laser-state{outline:2px solid var(--laser)}
+input[type=range]{width:100%;accent-color:var(--laser)}
+.power{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+#fire{width:100%;padding:14px;font-weight:750;font-size:15px;border-color:var(--laser);color:var(--laser);user-select:none;-webkit-user-select:none}
+#fire.firing{background:var(--laser);color:#fff}
+.switch{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+.switch input{width:18px;height:18px;accent-color:var(--laser)}
+.lower{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:12px;margin-top:12px}
+@media (max-width:820px){.lower{grid-template-columns:1fr}}
+#log{height:240px;overflow:auto;background:var(--bg);border-radius:8px;padding:8px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-all}
+#log .tx{color:var(--acc)} #log .err{color:var(--bad)} #log .msg{color:var(--mut)}
+.banner{border:1px solid var(--bad);color:var(--bad);border-radius:10px;padding:10px 12px;margin-bottom:12px;display:none}
+.banner.show{display:block}
+.info{color:var(--mut);font-size:12.5px}
+.k{font-family:ui-monospace,Menlo,monospace;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 4px}
+#imgCard{margin-top:12px}
+.imgwrap{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:18px}
+@media (max-width:820px){.imgwrap{grid-template-columns:1fr}}
+.drop{border:2px dashed var(--line);border-radius:10px;padding:16px;text-align:center;color:var(--mut);margin-bottom:10px}
+.drop.over{border-color:var(--acc);color:var(--acc)}
+.filebtn{color:var(--acc);cursor:pointer;text-decoration:underline}
+canvas#prev{aspect-ratio:auto;height:auto;max-height:460px;object-fit:contain;image-rendering:pixelated;background:#fff;cursor:default;display:none}
+.adj{display:grid;grid-template-columns:92px minmax(0,1fr) 44px;gap:6px 8px;align-items:center;margin-bottom:8px}
+.adj label{color:var(--mut);font-size:13px}
+.adj input[type=range]{accent-color:var(--acc)}
+.adj output{font-variant-numeric:tabular-nums;text-align:right;font-size:13px}
+select{max-width:100%}
+.progress{height:10px;background:var(--bg);border-radius:999px;overflow:hidden;margin:8px 0}
+.progress i{display:block;height:100%;width:0;background:var(--laser);transition:width .3s}
+.jobbox{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:10px;display:none}
+.jobbox.show{display:block}
+.jobbing .lockable{pointer-events:none;opacity:.45}
+#artCard{margin-top:12px}
+.artwrap{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}
+@media (max-width:820px){.artwrap{grid-template-columns:1fr}}
+.artstage{position:relative;width:100%;max-width:540px;aspect-ratio:1/1}
+.artstage canvas{position:absolute;inset:0;width:100%;height:100%;aspect-ratio:auto;touch-action:none}
+#art{background:#fff}
+#artOver{background:transparent}
+.warn{color:var(--warn)}
+hr{border:0;border-top:1px solid var(--line);margin:10px 0}
+</style></head><body><main>
+
+<header>
+  <h1>Laser Control</h1>
+  <span class="badge" id="state">Disconnected</span>
+  <span class="info" id="machine"></span>
+  <div class="grow"></div>
+  <button class="pri" id="connect">Connect engraver</button>
+  <button id="demo">Demo (simulator)</button>
+  <button id="disconnect" disabled>Disconnect</button>
+  <button id="estop" title="Esc">STOP</button>
+</header>
+
+<div class="banner" id="nosupport">This browser has no Web Serial. Open this page in <b>Microsoft Edge</b> or <b>Chrome</b> at http://localhost:8766 (Safari can't talk to USB serial devices).</div>
+<div class="banner" id="alarm"></div>
+
+<div class="grid">
+  <section class="card map-card">
+    <h2>Position</h2>
+    <div class="pos">
+      <div><span>X (work)</span><b id="px">–</b></div>
+      <div><span>Y (work)</span><b id="py">–</b></div>
+      <div><span>Speed / power</span><b id="pf" style="font-size:15px;padding-top:4px">–</b></div>
+    </div>
+    <canvas id="map" width="800" height="800"></canvas>
+    <p class="hint">Dashed box = the 55 × 55 mm travel limit (green once homed). Blue = the image you're about to engrave. Red = where the laser burned this session. Click the map to move there (laser off).</p>
+    <div class="row" style="margin-top:8px">
+      <button id="clearTrail">Clear trail</button>
+    </div>
+  </section>
+
+  <section class="card lockable">
+    <h2>Move</h2>
+    <div class="row">
+      <label>Step</label>
+      <div class="seg" id="steps"><button data-s="0.1">0.1</button><button data-s="1" class="on">1</button><button data-s="5">5</button><button data-s="10">10</button></div>
+      <label>mm</label>
+    </div>
+    <div class="row">
+      <label class="switch"><input type="checkbox" id="cont"> Hold to move continuously</label>
+    </div>
+    <div class="pad" id="pad">
+      <button data-d="-1,1">↖</button><button data-d="0,1">↑</button><button data-d="1,1">↗</button>
+      <button data-d="-1,0">←</button><button class="mid" id="goZero" title="Move to work origin">to 0,0</button><button data-d="1,0">→</button>
+      <button data-d="-1,-1">↙</button><button data-d="0,-1">↓</button><button data-d="1,-1">↘</button>
+    </div>
+    <div class="row">
+      <label for="speed">Speed</label>
+      <input type="range" id="speed" min="50" max="1000" step="50" value="600" style="flex:1;accent-color:var(--acc)">
+      <b id="speedv" style="min-width:90px;text-align:right">600 mm/min</b>
+    </div>
+    <div class="row">
+      <label>Go to</label> X <input type="number" id="gx" step="0.1" value="0"> Y <input type="number" id="gy" step="0.1" value="0">
+      <button id="goto">Go</button>
+    </div>
+    <div class="row">
+      <button id="home" title="$H">Home</button>
+      <button id="unlock" title="$X">Unlock</button>
+      <button id="setZero" title="G10 L20 P1 X0 Y0">Set origin here</button>
+    </div>
+    <p class="hint">Arrow keys move one step (when not typing). <span class="k">Esc</span> = STOP. Moves here always run with the laser off.</p>
+    <p class="info" id="limInfo" style="margin:8px 0 0"></p>
+  </section>
+
+  <section class="card" id="laserCard">
+    <h2>Laser</h2>
+    <div class="laser-state"><span class="dot" id="ldot"></span><span id="lstate">Laser off · not armed</span></div>
+    <label class="switch" style="margin-bottom:6px"><input type="checkbox" id="goggles"> I'm wearing laser safety goggles</label>
+    <label class="switch" style="margin-bottom:12px"><input type="checkbox" id="arm" disabled> <b>Laser armed</b></label>
+    <div class="row" style="justify-content:space-between;margin-bottom:2px">
+      <label>Power</label><span><span class="power" id="powv">1</span> % <span class="info" id="sv">(S10)</span></span>
+    </div>
+    <input type="range" id="power" min="0" max="20" step="0.5" value="1">
+    <div class="row" style="margin-top:6px">
+      <label for="cap">Power limit</label><input type="number" id="cap" min="1" max="100" step="1" value="20"> <label>%</label>
+    </div>
+    <button id="fire" disabled>Hold to fire (max 3 s)</button>
+    <p class="hint">Use 0.5–2 % to see a focus dot without marking. Release to stop.</p>
+    <div class="row" style="margin-top:10px">
+      <label class="switch"><input type="checkbox" id="burnJog" disabled> Burn while stepping (draws as it moves)</label>
+    </div>
+    <div class="row">
+      <label for="burnSpeed">Burn speed</label><input type="number" id="burnSpeed" min="10" max="1000" step="10" value="300"><label>mm/min</label>
+    </div>
+  </section>
+</div>
+
+<div class="lower">
+  <section class="card lockable">
+    <h2>Shapes</h2>
+    <div class="row"><label>Line to</label> X <input type="number" id="lx" step="0.1" value="10"> Y <input type="number" id="ly" step="0.1" value="10">
+      <button id="lineBurn" disabled>Burn line</button></div>
+    <div class="row"><label>Rectangle from here</label> W <input type="number" id="rw" step="0.5" min="0.5" value="20"> H <input type="number" id="rh" step="0.5" min="0.5" value="10"></div>
+    <div class="row"><button id="rectFrame">Trace outline (laser off)</button><button id="rectBurn" disabled>Burn rectangle</button></div>
+    <p class="hint">Burning uses the power slider and burn speed, with Grbl's dynamic laser mode (M4): power follows the actual speed, so corners don't over-burn.</p>
+  </section>
+  <section class="card">
+    <h2>Console</h2>
+    <div id="log"></div>
+    <div class="row" style="margin-top:8px">
+      <input type="text" id="cmd" placeholder="G-code or $ command, e.g. $$" style="flex:1" autocomplete="off" spellcheck="false">
+      <button id="send">Send</button><button id="settings">$$</button><button id="clearLog">Clear</button>
+    </div>
+    <p class="hint">Commands typed here go to the engraver as-is, including laser commands, so take care.</p>
+  </section>
+</div>
+
+<section class="card lockable" id="artCard">
+  <h2>Draw your own</h2>
+  <div class="artwrap">
+    <div class="artstage"><canvas id="art" width="550" height="550"></canvas><canvas id="artOver" width="550" height="550"></canvas></div>
+    <div>
+      <div class="row"><div class="seg" id="tools">
+        <button data-t="pen" class="on">✎ Pen</button><button data-t="line">╱ Line</button><button data-t="rect">▭ Box</button><button data-t="ellipse">◯ Ellipse</button><button data-t="text">T Text</button><button data-t="erase">⌫ Eraser</button>
+      </div></div>
+      <div class="adj" style="grid-template-columns:92px minmax(0,1fr) 60px">
+        <label for="artW">Line width</label><input type="range" id="artW" min="0.2" max="5" step="0.1" value="0.8"><output id="artWv">0.8 mm</output>
+      </div>
+      <div class="row"><label>Shade</label><div class="seg" id="shades"><button data-c="#000000" class="on">Black</button><button data-c="#555555">Dark</button><button data-c="#999999">Mid</button><button data-c="#cccccc">Light</button></div></div>
+      <div class="row"><label class="switch"><input type="checkbox" id="artFill"> Filled shapes</label><label class="switch"><input type="checkbox" id="artGrid" checked> Grid (5 mm)</label></div>
+      <div class="row"><label>Text</label><input type="number" id="artFont" min="1" max="40" step="0.5" value="6"><label>mm</label>
+        <select id="artFace"><option value="-apple-system,Helvetica,Arial,sans-serif">Sans</option><option value="Georgia,'Times New Roman',serif">Serif</option><option value="'Courier New',monospace">Mono</option><option value="'Snell Roundhand','Brush Script MT',cursive">Script</option><option value="Impact,'Arial Black',sans-serif">Heavy</option></select></div>
+      <div class="row"><button id="artUndo">Undo</button><button id="artClear">Clear</button><button id="artImg">Add picture…</button><input type="file" id="artFile" accept="image/*,.svg" hidden></div>
+      <div class="row"><button class="pri" id="artUse">Use drawing for engraving ↓</button></div>
+      <p class="hint">The square is the full 55 × 55 mm work area; your drawing is engraved at the same spot (bottom-left = bottom-left of the travel box). Grey shades engrave lighter in Grayscale mode. Your drawing is kept in this browser.</p>
+    </div>
+  </div>
+</section>
+
+<section class="card" id="imgCard">
+  <h2>Image engraving</h2>
+  <div class="imgwrap">
+    <div>
+      <div class="drop lockable" id="drop">Drop an image here, paste one (⌘V), or <label class="filebtn">choose a file<input type="file" id="file" accept="image/*,.svg" hidden></label>
+        <div class="info" style="margin-top:4px">PNG · JPG · GIF · WebP · BMP · AVIF · SVG — photos, logos, drawings · <a href="#" id="sample">try a test image</a></div></div>
+      <canvas id="prev"></canvas>
+      <p class="info" id="imgInfo">No image loaded.</p>
+    </div>
+    <div>
+      <div class="lockable">
+        <div class="row"><label for="mode">Mode</label>
+          <select id="mode">
+            <option value="threshold">Black &amp; white — logos, text, line art</option>
+            <option value="fs">Dither (Floyd–Steinberg) — photos</option>
+            <option value="atkinson">Dither (Atkinson) — photos, punchier</option>
+            <option value="gray">Grayscale — power follows darkness</option>
+            <option value="outline">Outline — edges only</option>
+          </select></div>
+        <div class="row">
+          <label>Size</label> W <input type="number" id="iw" min="1" step="0.5" value="40"> H <input type="number" id="ih" min="1" step="0.5" value="40"> <label>mm</label>
+          <label class="switch"><input type="checkbox" id="lock" checked> keep ratio</label>
+        </div>
+        <div class="row">
+          <label for="lpm">Resolution</label>
+          <select id="lpm"><option value="5">5 lines/mm (fast, coarse)</option><option value="8">8 lines/mm</option><option value="10" selected>10 lines/mm (0.1 mm)</option><option value="12.5">12.5 lines/mm</option><option value="16">16 lines/mm (slow, fine)</option></select>
+        </div>
+        <div class="row">
+          <label>Bottom-left at</label> X <input type="number" id="ix" step="0.5" value="0"> Y <input type="number" id="iy" step="0.5" value="0">
+          <button id="placeHere" title="Put the image's bottom-left corner at the laser's current position">Here</button><button id="placeCenter">Center</button>
+        </div>
+        <hr>
+        <div class="adj">
+          <label for="bright">Brightness</label><input type="range" id="bright" min="-100" max="100" value="0"><output id="brightv">0</output>
+          <label for="contrast">Contrast</label><input type="range" id="contrast" min="-100" max="100" value="0"><output id="contrastv">0</output>
+          <label for="gamma">Gamma</label><input type="range" id="gamma" min="0.3" max="3" step="0.05" value="1"><output id="gammav">1</output>
+          <label for="thresh" id="threshl">Threshold</label><input type="range" id="thresh" min="1" max="99" value="50"><output id="threshv">50</output>
+        </div>
+        <div class="row">
+          <label class="switch"><input type="checkbox" id="invert"> Invert</label>
+          <label class="switch"><input type="checkbox" id="mirror"> Mirror</label>
+          <button id="rotate">Rotate 90°</button>
+          <button id="resetAdj">Reset</button>
+        </div>
+        <hr>
+        <div class="row">
+          <label>Speed</label><input type="number" id="ispeed" min="50" max="1000" step="50" value="800"><label>mm/min</label>
+        </div>
+        <div class="row">
+          <label>Max power</label><input type="number" id="imax" min="0.5" max="100" step="0.5" value="20"><label>%</label>
+          <span id="iminbox"><label>Min power</label> <input type="number" id="imin" min="0" max="100" step="0.5" value="0"> <label>%</label></span>
+        </div>
+        <p class="info" id="powNote"></p>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button id="imgFrame" disabled>Trace outline (laser off)</button>
+        <button id="imgBurn" class="pri" disabled>Engrave</button>
+      </div>
+      <p class="info" id="est"></p>
+      <div class="jobbox" id="jobbox">
+        <div class="row" style="justify-content:space-between;margin:0"><b id="jobTitle">Engraving</b><span class="info" id="jobTime"></span></div>
+        <div class="progress"><i id="jobBar"></i></div>
+        <div class="row" style="margin:0"><button id="jobPause">Pause</button><button id="jobCancel">Cancel</button><span class="info" id="jobState"></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const ERR = {1:'G-code word without a letter',2:'bad number',3:'unknown $ command',4:'negative value',5:'homing not enabled',8:'needs Idle state',9:'locked by alarm – Unlock or Home',10:'soft limit',11:'line too long',12:'step rate too high',13:'safety door open',15:'jog target outside travel limits',16:'bad jog command',17:'laser mode needs PWM',20:'unsupported G-code',22:'feed rate missing',24:'two G-codes in one group',33:'invalid target',37:'tool offset missing'};
+const ALARM = {1:'hard limit switch hit – position lost, home again',2:'move outside soft limits',3:'reset while moving – position lost, home again',4:'probe fail',5:'probe fail',6:'homing failed (reset during homing)',7:'homing failed (door)',8:'homing failed (could not clear switch)',9:'homing failed (switch not found)',10:'homing failed'};
+
+// ---------------- state ----------------
+const M = {
+  t: null,            // transport {write(Uint8Array), close()}
+  state: 'Disconnected', wpos:[0,0,0], wco:[0,0,0], feed:0, spindle:0,
+  maxS:1000, travel:[55,55], maxRate:[1000,1000], laserMode:true,
+  armed:false, laserOn:false,
+  queue:[], waiting:null, waitSince:0,
+  trail:[], lastPos:null,
+  homeMask:3, pulloff:1,     // $23 homing direction mask, $27 pull-off
+  env:null,                  // machine-coordinate travel box from homing: [[xmin,xmax],[ymin,ymax]]
+  homedPending:false, plan:null,  // plan = where the last queued move ends (work coords)
+};
+const enc = new TextEncoder();
+let pollTimer=null, guardTimer=null, fireTimer=null, rxBuf='';
+
+function log(text, cls){
+  const el=$('log'), d=document.createElement('div');
+  if(cls) d.className=cls;
+  d.textContent=text;
+  el.appendChild(d);
+  while(el.childNodes.length>400) el.removeChild(el.firstChild);
+  el.scrollTop=el.scrollHeight;
+}
+
+// ---------------- transport ----------------
+function writeRaw(bytes){ if(M.t) M.t.write(bytes); }
+function realtime(code){ writeRaw(new Uint8Array([code])); }
+function send(line){
+  if(!M.t){ log('not connected','err'); return; }
+  if(JOB.active){ log('Engraving in progress – use Pause or Cancel','err'); return; }
+  M.queue.push(line); pump();
+}
+function pump(){
+  if(M.waiting || !M.queue.length || !M.t) return;
+  M.waiting = M.queue.shift(); M.waitSince = Date.now();
+  writeRaw(enc.encode(M.waiting+'\n'));
+  log('> '+M.waiting,'tx');
+}
+function flushQueue(){ M.queue=[]; M.waiting=null; }
+
+function onLine(line){
+  line=line.trim(); if(!line) return;
+  if(line[0]==='<'){ parseStatus(line); return; }
+  if(JOB.active && (line==='ok' || line.startsWith('error:'))){ jobAck(line); return; }
+  if(line==='ok'){ if(M.waiting==='$H') M.homedPending=true; M.waiting=null; pump(); return; }
+  if(line.startsWith('error:')){
+    const n=+line.slice(6); log(line+(ERR[n]?' – '+ERR[n]:'')+(M.waiting?'  (for: '+M.waiting+')':''),'err');
+    M.waiting=null; pump(); return;
+  }
+  if(line.startsWith('ALARM:')){
+    const n=+line.slice(6); log(line+(ALARM[n]?' – '+ALARM[n]:''),'err');
+    if([1,3,6,7,8,9,10].includes(n)){ M.env=null; M.plan=null; }  // position lost
+    showAlarm('ALARM '+n+(ALARM[n]?': '+ALARM[n]:'')+'. Laser disarmed. Use Home (or Unlock if you are sure where the head is).');
+    disarm('alarm'); return;
+  }
+  if(/^Grbl \d/.test(line)){  // the engraver restarted (soft reset or power)
+    log(line,'msg'); flushQueue(); disarm('Grbl reset');
+    setTimeout(()=>{ if(M.t){ send('$I'); send('$$'); } },300);
+    return;
+  }
+  const s=line.match(/^\$(\d+)=([-\d.]+)/);
+  if(s){ applySetting(+s[1],+s[2]); }
+  log(line, line.startsWith('[')?'msg':'');
+}
+function applySetting(k,v){
+  if(k===30) M.maxS=v||1000;
+  if(k===130) M.travel[0]=v; if(k===131) M.travel[1]=v;
+  if(k===110) M.maxRate[0]=v; if(k===111) M.maxRate[1]=v;
+  if(k===32) M.laserMode=v===1;
+  if(k===23) M.homeMask=v; if(k===27) M.pulloff=v;
+  if(k===110||k===111){ const mx=Math.min(M.maxRate[0],M.maxRate[1]); $('speed').max=mx; if(+$('speed').value>mx) $('speed').value=mx; updateSpeed(); }
+  updatePower(); drawMap();
+}
+function parseStatus(line){
+  const parts=line.slice(1,-1).split('|');
+  M.state=parts[0].split(':')[0];
+  let mpos=null;
+  for(const p of parts.slice(1)){
+    const [k,v]=p.split(':'); if(v===undefined) continue;
+    const n=v.split(',').map(Number);
+    if(k==='WPos') M.wpos=n;
+    else if(k==='MPos') mpos=n;
+    else if(k==='WCO') M.wco=n;
+    else if(k==='FS'){ M.feed=n[0]; M.spindle=n[1]||0; }
+    else if(k==='F'){ M.feed=n[0]; }
+  }
+  if(mpos) M.wpos=mpos.map((x,i)=>x-(M.wco[i]||0));
+  // burn trail: segment between status reports while moving with the laser commanded on
+  const p=[M.wpos[0],M.wpos[1]], moving=(M.state==='Run'||M.state==='Jog');
+  if(M.lastPos && moving && M.spindle>0) M.trail.push([M.lastPos,p,M.spindle/M.maxS]);
+  if(M.laserOn && M.spindle>0 && !moving && M.lastPos) M.trail.push([p,p,M.spindle/M.maxS]);
+  M.lastPos=p;
+  if(JOB.active && JOB.draining && M.state==='Idle'){ if(++JOB.idleSeen>=2) finishJob(); }
+  if(M.homedPending && M.state==='Idle'){ M.homedPending=false; setEnvFromHome(); }
+  // forget the plan once the engraver has settled (status can lag a fresh command by a few reports)
+  if(M.plan && M.state==='Idle' && !M.waiting && !M.queue.length && !JOB.active && Date.now()-M.planAt>600) M.plan=null;
+  if(M.state!=='Alarm') hideAlarm();
+  render();
+}
+
+async function connectSerial(){
+  if(!('serial' in navigator)){ $('nosupport').classList.add('show'); return; }
+  let port;
+  // common USB-serial chips on Grbl laser boards: CH340/CH9102, CP210x, FTDI, Arduino, ESP32 native USB, STM32 CDC
+  const vendors=[0x1a86,0x10c4,0x0403,0x2341,0x303a,0x0483];
+  try{ port=await navigator.serial.requestPort({filters:vendors.map(v=>({usbVendorId:v}))}); }
+  catch(e){ log('No port chosen. Most engravers show up as "USB Serial" (CH340), "CP210x" or similar.','msg'); return; }
+  try{ await port.open({baudRate:115200}); }
+  catch(e){ log('Could not open the port: '+e.message+' – is another program (or a terminal) using it?','err'); return; }
+  const writer=port.writable.getWriter();
+  let reader=null, open=true;
+  M.t={ write:b=>writer.write(b).catch(()=>{}), close:async()=>{ open=false; try{reader&&await reader.cancel()}catch(e){} try{writer.releaseLock()}catch(e){} try{await port.close()}catch(e){} } };
+  (async()=>{
+    const dec=new TextDecoder();
+    while(open && port.readable){
+      reader=port.readable.getReader();
+      try{ for(;;){ const {value,done}=await reader.read(); if(done) break; feed(dec.decode(value,{stream:true})); } }
+      catch(e){ if(open) log('Read error: '+e.message,'err'); }
+      finally{ try{reader.releaseLock()}catch(e){} }
+      if(open) break;
+    }
+    if(open) lostConnection();
+  })();
+  port.addEventListener('disconnect',()=>{ if(M.t) lostConnection(); });
+  connected('USB');
+}
+function feed(text){
+  rxBuf+=text;
+  let i; while((i=rxBuf.search(/\r?\n/))>=0){ const l=rxBuf.slice(0,i); rxBuf=rxBuf.slice(i+(rxBuf[i]==='\r'?2:1)); onLine(l); }
+  // status reports can arrive without a newline right before the next one
+}
+function connected(kind){
+  flushQueue(); M.trail=[]; M.lastPos=null;
+  log('Connected ('+kind+')','msg');
+  realtime(0x85); send('M5'); send('$I'); send('$$');
+  pollTimer=setInterval(()=>{ if(M.t) realtime(0x3f); },200);
+  // stuck reply guard (homing can take a while)
+  clearInterval(guardTimer);
+  guardTimer=setInterval(()=>{ if(M.waiting && Date.now()-M.waitSince > (M.waiting.startsWith('$H')?90000:15000)){ log('no reply to "'+M.waiting+'", continuing','err'); M.waiting=null; pump(); } },1000);
+  render();
+}
+async function disconnect(){
+  if(!M.t) return;
+  if(JOB.active){ realtime(0x21); realtime(0x18); JOB.active=false; log('Engraving stopped (disconnect)','err'); }
+  else { try{ writeRaw(enc.encode('M5\n')); }catch(e){} }
+  disarm('disconnect'); M.env=null;
+  clearInterval(pollTimer); const t=M.t; M.t=null; flushQueue();
+  await new Promise(r=>setTimeout(r,100)); await t.close();
+  M.state='Disconnected'; log('Disconnected','msg'); render();
+}
+function lostConnection(){
+  clearInterval(pollTimer); M.t=null; flushQueue(); disarm('connection lost'); M.env=null;
+  M.state='Disconnected'; log('Connection lost – the engraver was unplugged or reset','err'); render();
+}
+
+// ---------------- safety ----------------
+function estop(){
+  stopFire(true);
+  if(M.t){ realtime(0x85); realtime(0x21); setTimeout(()=>{ realtime(0x18); flushQueue(); },60); }
+  disarm('STOP');
+  log('STOP: jog cancel, feed hold, soft reset','err');
+}
+function disarm(why){
+  const was=M.armed||M.laserOn;
+  if(JOB.active) cancelJob(why);
+  M.armed=false; M.laserOn=false; clearTimeout(fireTimer);
+  $('arm').checked=false; $('burnJog').checked=false;
+  if(was && why) log('Laser disarmed ('+why+')','msg');
+  render();
+}
+function showAlarm(t){ const b=$('alarm'); b.textContent=t; b.classList.add('show'); }
+function hideAlarm(){ $('alarm').classList.remove('show'); }
+function laserCmdAllowed(){
+  if(!M.t){ log('not connected','err'); return false; }
+  if(!M.armed){ log('Arm the laser first','err'); return false; }
+  if(M.state==='Alarm'){ log('Engraver is in ALARM – Home or Unlock first','err'); return false; }
+  return true;
+}
+// While an engraving runs the page may be hidden (it keeps streaming); otherwise hiding disarms.
+document.addEventListener('visibilitychange',()=>{ if(document.hidden && !JOB.active && (M.laserOn||M.armed) && M.t){ writeRaw(enc.encode('M5\n')); stopFire(true); disarm('page hidden'); } });
+window.addEventListener('pagehide',()=>{ if(!M.t) return; if(JOB.active){ realtime(0x21); realtime(0x18); } else { realtime(0x85); writeRaw(enc.encode('M5\n')); } });
+window.addEventListener('blur',()=>{ if(M.laserOn) stopFire(); });
+
+// ---------------- power ----------------
+const pct=()=>Math.min(+$('power').value, +$('cap').value);
+const sVal=()=>Math.round(pct()/100*M.maxS);
+function updatePower(){
+  const cap=Math.max(1,Math.min(100,+$('cap').value||20));
+  $('power').max=cap; if(+$('power').value>cap) $('power').value=cap;
+  $('powv').textContent=(+$('power').value).toFixed(+$('power').value%1?1:0);
+  $('sv').textContent='(S'+sVal()+' of '+M.maxS+')';
+}
+let lastCap=20;
+$('cap').addEventListener('change',e=>{
+  let v=Math.max(1,Math.min(100,Math.round(+e.target.value||20)));
+  if(v>lastCap && v>20 && !confirm('Raise the power limit to '+v+' %?\nAbove ~20 % this laser burns wood, paper and skin quickly, and the beam reflects off shiny surfaces.')) v=lastCap;
+  e.target.value=v; lastCap=v; updatePower();
+});
+$('power').addEventListener('input',()=>{ updatePower(); if(M.laserOn && M.armed) send('S'+sVal()); });
+
+// ---------------- moving ----------------
+let step=1;
+const speed=()=>+$('speed').value;
+const fmt=v=>(Math.round(v*1000)/1000).toString();
+function updateSpeed(){ $('speedv').textContent=speed()+' mm/min'; }
+$('speed').addEventListener('input',updateSpeed);
+$('steps').onclick=e=>{ const s=e.target.dataset.s; if(!s) return; step=+s; [...$('steps').children].forEach(b=>b.classList.toggle('on',b===e.target)); };
+
+function canMove(){
+  if(!M.t){ log('not connected','err'); return false; }
+  if(JOB.active){ log('Engraving in progress','err'); return false; }
+  if(M.state==='Alarm'){ log('Engraver is in ALARM – Home or Unlock first','err'); return false; }
+  if(M.laserOn){ log('Stop firing before moving','err'); return false; }
+  return true;
+}
+function jogStep(dx,dy){
+  if(!canMove()) return;
+  // absolute targets, clamped to the travel box, so repeated steps can never run past it
+  const b=basePos(), tx=clampX(b[0]+dx*step), ty=clampY(b[1]+dy*step);
+  if(Math.abs(tx-b[0])<EPS && Math.abs(ty-b[1])<EPS){ log('At the '+MAXTRAVEL+' mm travel limit','msg'); flashLimit(); return; }
+  if(Math.abs(tx-(b[0]+dx*step))>EPS || Math.abs(ty-(b[1]+dy*step))>EPS) flashLimit();
+  setPlan(tx,ty);
+  if($('burnJog').checked && M.armed){
+    const f=Math.min(+$('burnSpeed').value||300, speed());
+    send(`G90 G1 X${fmt(tx)} Y${fmt(ty)} F${f} M4 S${sVal()}`); send('M5 G0');
+  } else {
+    send(`$J=G90 X${fmt(tx)} Y${fmt(ty)} F${speed()}`);
+  }
+}
+let holding=false;
+function jogHoldStart(dx,dy){
+  if(!canMove()) return;
+  // jog to the edge of the travel box in that direction; released = jog cancel
+  const b=basePos(), L=limits(); let t=Infinity;
+  if(dx) t=Math.min(t, dx>0 ? L[1]-b[0] : b[0]-L[0]);
+  if(dy) t=Math.min(t, dy>0 ? L[3]-b[1] : b[1]-L[2]);
+  if(!(t>EPS)){ log('At the '+MAXTRAVEL+' mm travel limit','msg'); flashLimit(); return; }
+  holding=true; M.plan=null;
+  send(`$J=G90 X${fmt(b[0]+dx*t)} Y${fmt(b[1]+dy*t)} F${speed()}`);
+}
+function jogHoldEnd(){ if(!holding) return; holding=false; realtime(0x85); M.plan=null; }
+for(const b of $('pad').querySelectorAll('[data-d]')){
+  const [dx,dy]=b.dataset.d.split(',').map(Number);
+  b.addEventListener('pointerdown',e=>{ e.preventDefault(); b.setPointerCapture(e.pointerId); if($('cont').checked && !$('burnJog').checked) jogHoldStart(dx,dy); else jogStep(dx,dy); });
+  b.addEventListener('pointerup',jogHoldEnd);
+  b.addEventListener('pointercancel',jogHoldEnd);
+  b.addEventListener('lostpointercapture',jogHoldEnd);
+}
+function moveTo(x,y){
+  if(!canMove()) return;
+  const tx=clampX(x), ty=clampY(y);
+  if(Math.abs(tx-x)>EPS || Math.abs(ty-y)>EPS){ log(`Target limited to the travel box: X${fmt(tx)} Y${fmt(ty)}`,'msg'); flashLimit(); }
+  setPlan(tx,ty); send('M5'); send(`$J=G90 X${fmt(tx)} Y${fmt(ty)} F${speed()}`);
+}
+$('goZero').onclick=()=>moveTo(0,0);
+$('goto').onclick=()=>moveTo(+$('gx').value,+$('gy').value);
+$('home').onclick=()=>{ if(!M.t) return; send('M5'); send('$H'); hideAlarm(); };
+$('unlock').onclick=()=>{ if(!M.t) return; send('$X'); hideAlarm(); };
+$('setZero').onclick=()=>{ if(!canMove()) return; send('G10 L20 P1 X0 Y0'); M.trail=[]; M.lastPos=null; };
+
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){ e.preventDefault(); estop(); return; }
+  const ae=document.activeElement; // arrows belong to inputs and sliders (power!) while they have focus
+  if(/INPUT|TEXTAREA|SELECT/.test(ae.tagName) && ae.type!=='checkbox') return;
+  const d={ArrowUp:[0,1],ArrowDown:[0,-1],ArrowLeft:[-1,0],ArrowRight:[1,0]}[e.key];
+  if(d){ e.preventDefault(); if(!e.repeat) jogStep(d[0],d[1]); }
+});
+
+// ---------------- laser ----------------
+$('goggles').onchange=e=>{ $('arm').disabled=!e.target.checked; if(!e.target.checked) disarm('goggles unchecked'); render(); };
+$('arm').onchange=e=>{
+  if(e.target.checked){
+    if(!M.t){ e.target.checked=false; log('not connected','err'); return; }
+    if(!M.laserMode){ log('Warning: laser mode ($32) is off on the engraver – the laser stays on during rapid moves. Set $32=1.','err'); }
+    M.armed=true; log('Laser armed','msg');
+  } else { send('M5'); disarm('turned off'); }
+  render();
+};
+function startFire(){
+  if(!laserCmdAllowed()) return;
+  if(M.state!=='Idle'){ log('Wait until the engraver is Idle','err'); return; }
+  M.laserOn=true;
+  // In Grbl laser mode the beam is only on in a G1/G2/G3 motion mode, so select G1 first;
+  // M3 (constant power) then keeps it on while standing still.
+  send('G1 F'+(+$('burnSpeed').value||300)); send('M3 S'+sVal());
+  clearTimeout(fireTimer); fireTimer=setTimeout(()=>{ log('Fire cut off after 3 s','msg'); stopFire(); },3000);
+  render();
+}
+function stopFire(silent){
+  clearTimeout(fireTimer);
+  if(!M.laserOn) return;
+  M.laserOn=false;
+  if(M.t){ // M5 jumps the queue: write it straight away, then keep the queue consistent
+    M.queue=M.queue.filter(l=>!/^M3|^G1 F\d+$/.test(l));
+    send('M5'); send('G0');
+  }
+  render();
+}
+const fire=$('fire');
+fire.addEventListener('pointerdown',e=>{ e.preventDefault(); fire.setPointerCapture(e.pointerId); startFire(); });
+['pointerup','pointercancel','lostpointercapture'].forEach(ev=>fire.addEventListener(ev,()=>stopFire()));
+$('burnJog').onchange=e=>{ if(e.target.checked && !M.armed){ e.target.checked=false; } render(); };
+
+// ---------------- shapes ----------------
+function pathInside(pts){
+  if(pts.every(p=>insideBox(p[0],p[1],p[0],p[1]))) return true;
+  log('That shape goes outside the '+MAXTRAVEL+' × '+MAXTRAVEL+' mm travel box – make it smaller or move first','err'); flashLimit(); return false;
+}
+function burnPath(pts){
+  if(!laserCmdAllowed()||!canMove()||!pathInside(pts)) return;
+  const f=Math.min(+$('burnSpeed').value||300, speed()), s=sVal();
+  send('G90'); send(`G1 X${fmt(pts[0][0])} Y${fmt(pts[0][1])} F${f} M4 S${s}`);
+  for(const p of pts.slice(1)) send(`G1 X${fmt(p[0])} Y${fmt(p[1])}`);
+  send('M5'); send('G0');
+}
+function rectPts(){ const [x,y]=basePos(),w=+$('rw').value,h=+$('rh').value; return [[x+w,y],[x+w,y+h],[x,y+h],[x,y]]; }
+$('lineBurn').onclick=()=>burnPath([[+$('lx').value,+$('ly').value]]);
+$('rectBurn').onclick=()=>{ if(confirm(`Burn a ${$('rw').value} × ${$('rh').value} mm rectangle at ${pct()} % power?`)) burnPath(rectPts()); };
+$('rectFrame').onclick=()=>{ if(!canMove()) return; const pts=rectPts(); if(!pathInside(pts)) return; send('M5'); for(const p of pts) send(`$J=G90 X${fmt(p[0])} Y${fmt(p[1])} F${speed()}`); };
+
+// ---------------- console ----------------
+function sendCmd(){ const c=$('cmd').value.trim(); if(!c) return; if(/^(M3|M4)|\bM[34]\b/i.test(c) && !M.armed){ log('Laser commands need "Laser armed"','err'); return; } send(c); $('cmd').value=''; }
+$('send').onclick=sendCmd;
+$('cmd').addEventListener('keydown',e=>{ if(e.key==='Enter') sendCmd(); });
+$('settings').onclick=()=>send('$$');
+$('clearLog').onclick=()=>$('log').innerHTML='';
+$('clearTrail').onclick=()=>{ M.trail=[]; drawMap(); };
+
+// ---------------- map ----------------
+const cv=$('map'), cx=cv.getContext('2d');
+let view=null;
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function drawMap(){
+  const W=cv.width,H=cv.height,pad=46;
+  const Lm=limits();
+  let x0=Math.min(Lm[0],0,M.wpos[0]-3), x1=Math.max(Lm[1],M.wpos[0]+3), y0=Math.min(Lm[2],0,M.wpos[1]-3), y1=Math.max(Lm[3],M.wpos[1]+3);
+  const span=Math.max(x1-x0,y1-y0), k=(W-2*pad)/span;
+  view={x0,y0,k,pad,H};
+  const X=x=>pad+(x-x0)*k, Y=y=>H-pad-(y-y0)*k;
+  cx.clearRect(0,0,W,H);
+  cx.lineWidth=1; cx.strokeStyle=css('--grid'); cx.fillStyle=css('--mut'); cx.font='20px -apple-system,sans-serif';
+  const g=span>120?20:span>60?10:5;
+  for(let v=Math.ceil(x0/g)*g; v<=x0+span; v+=g){ cx.beginPath(); cx.moveTo(X(v),pad/2); cx.lineTo(X(v),H-pad); cx.stroke(); cx.fillText(v,X(v)-8,H-pad+26); }
+  for(let v=Math.ceil(y0/g)*g; v<=y0+span; v+=g){ cx.beginPath(); cx.moveTo(pad,Y(v)); cx.lineTo(W-pad/2,Y(v)); cx.stroke(); cx.fillText(v,6,Y(v)+7); }
+  // planned image
+  if(IMG.P && $('prev').width){ const ix=+$('ix').value, iy=+$('iy').value, iw=+$('iw').value, ih=+$('ih').value;
+    cx.globalAlpha=.55; cx.imageSmoothingEnabled=false; cx.drawImage($('prev'),X(ix),Y(iy+ih),iw*k,ih*k); cx.globalAlpha=1;
+    cx.strokeStyle=css('--acc'); cx.lineWidth=2; cx.strokeRect(X(ix),Y(iy+ih),iw*k,ih*k); }
+  // travel box (the app never moves outside it)
+  cx.strokeStyle=M.env?css('--ok'):css('--mut'); cx.lineWidth=2; cx.setLineDash([8,6]); cx.strokeRect(X(Lm[0]),Y(Lm[3]),(Lm[1]-Lm[0])*k,(Lm[3]-Lm[2])*k); cx.setLineDash([]);
+  // origin
+  cx.strokeStyle=css('--mut'); cx.beginPath(); cx.arc(X(0),Y(0),7,0,7); cx.stroke();
+  // trail
+  cx.strokeStyle=css('--burn'); cx.lineCap='round';
+  for(const [a,b,p] of M.trail){ cx.globalAlpha=Math.max(.25,Math.min(1,p*3)); cx.lineWidth=4; cx.beginPath(); cx.moveTo(X(a[0]),Y(a[1])); cx.lineTo(X(b[0])+(a===b?.1:0),Y(b[1])); cx.stroke(); }
+  cx.globalAlpha=1;
+  // head
+  const hx=X(M.wpos[0]), hy=Y(M.wpos[1]);
+  cx.strokeStyle=M.laserOn||M.spindle>0?css('--laser'):css('--head'); cx.lineWidth=3;
+  cx.beginPath(); cx.moveTo(hx-16,hy); cx.lineTo(hx+16,hy); cx.moveTo(hx,hy-16); cx.lineTo(hx,hy+16); cx.stroke();
+  cx.beginPath(); cx.arc(hx,hy,8,0,7); cx.stroke();
+}
+cv.addEventListener('click',e=>{
+  if(!view) return; const r=cv.getBoundingClientRect(), sx=cv.width/r.width;
+  const x=view.x0+((e.clientX-r.left)*sx-view.pad)/view.k, y=view.y0+(view.H-view.pad-(e.clientY-r.top)*sx)/view.k;
+  $('gx').value=fmt(Math.round(x*10)/10); $('gy').value=fmt(Math.round(y*10)/10);
+  moveTo(+$('gx').value,+$('gy').value);
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',drawMap);
+
+// ---------------- travel limits ----------------
+// Hard rule for this app: the head never moves more than 55 mm on X or Y. Every move the page
+// generates is clamped to (or checked against) this box. Before homing the box is counted from the
+// work origin; after a successful $H it comes from the engraver's real end stops.
+const MAXTRAVEL=55, EPS=1e-3;
+function travel(i){ return Math.min(MAXTRAVEL, M.travel[i]||MAXTRAVEL); }
+function limits(){ // [xmin,xmax,ymin,ymax] in WORK coordinates
+  if(M.env) return [M.env[0][0]-M.wco[0], M.env[0][1]-M.wco[0], M.env[1][0]-M.wco[1], M.env[1][1]-M.wco[1]];
+  return [0,travel(0),0,travel(1)];
+}
+function clampX(x){ const L=limits(); return Math.min(L[1],Math.max(L[0],x)); }
+function clampY(y){ const L=limits(); return Math.min(L[3],Math.max(L[2],y)); }
+function insideBox(x0,y0,x1,y1){ const L=limits(); return x0>=L[0]-EPS && x1<=L[1]+EPS && y0>=L[2]-EPS && y1<=L[3]+EPS; }
+function basePos(){ return M.plan ? [...M.plan] : [M.wpos[0],M.wpos[1]]; } // where queued moves end
+function setPlan(x,y){ M.plan=[x,y]; M.planAt=Date.now(); }
+function setEnvFromHome(){
+  // Grbl: $23 bit set = that axis homes toward its negative end, so home sits at the low end of the
+  // travel (minus the pull-off); otherwise at the high end.
+  const mpos=[M.wpos[0]+M.wco[0], M.wpos[1]+M.wco[1]];
+  M.env=[0,1].map(i=>{ const neg=(M.homeMask>>i)&1, t=travel(i), po=M.pulloff||0;
+    const min=neg ? mpos[i]-po : mpos[i]+po-t; return [min,min+t]; });
+  const L=limits();
+  log(`Homed: travel box set to X ${fmt(L[0])}…${fmt(L[1])}, Y ${fmt(L[2])}…${fmt(L[3])} (work coords)`,'msg');
+  scheduleProcess(0); render();
+}
+let limitFlash=0;
+function flashLimit(){ limitFlash=Date.now(); const el=$('limInfo'); el.style.outline='2px solid var(--warn)'; el.style.borderRadius='6px'; setTimeout(()=>{ if(Date.now()-limitFlash>=900) el.style.outline=''; },1000); }
+
+// ---------------- images ----------------
+const IMG={ src:null, name:'', sw:0, sh:0, rot:0, P:null, w:0, h:0, job:null, ok:false };
+const IMG_KEYS=['mode','lpm','bright','contrast','gamma','thresh','ispeed','imax','imin'];
+function saveImgSettings(){ try{ const o={}; for(const k of IMG_KEYS) o[k]=$(k).value; localStorage.setItem('laserctl.img',JSON.stringify(o)); }catch(e){} }
+function loadImgSettings(){ try{ const o=JSON.parse(localStorage.getItem('laserctl.img')||'{}'); for(const k of IMG_KEYS) if(o[k]!=null) $(k).value=o[k]; }catch(e){} }
+const r1=v=>Math.round(v*10)/10;
+function aspect(){ return IMG.rot%180 ? IMG.sw/IMG.sh : IMG.sh/IMG.sw; } // height / width
+
+async function decodeImage(file){
+  const isSvg=file.type==='image/svg+xml' || /\.svg$/i.test(file.name);
+  let url;
+  if(isSvg){
+    // SVGs often have no pixel size; give them one so the browser renders them sharply
+    const doc=new DOMParser().parseFromString(await file.text(),'image/svg+xml'), svg=doc.documentElement;
+    if(svg.nodeName.toLowerCase()!=='svg') throw new Error('not a valid SVG');
+    const num=a=>{ const v=svg.getAttribute(a); return v && !/%/.test(v) ? parseFloat(v) : NaN; };
+    let w=num('width'), h=num('height'); const vb=(svg.getAttribute('viewBox')||'').trim().split(/[\s,]+/).map(Number);
+    if(!(w>0&&h>0)){ if(vb.length===4&&vb[2]>0&&vb[3]>0){ w=vb[2]; h=vb[3]; } else { w=h=1000; } }
+    if(vb.length!==4) svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
+    const sc=2000/Math.max(w,h); svg.setAttribute('width',w*sc); svg.setAttribute('height',h*sc);
+    url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml'}));
+  } else url=URL.createObjectURL(file);
+  const img=new Image(); img.src=url;
+  try{ await img.decode(); }
+  catch(e){ throw new Error(/hei[cf]/i.test(file.name+file.type) ? 'iPhone HEIC photos can\'t be read by the browser – open it in Preview or Photos and export as JPEG first' : 'this file isn\'t an image the browser can read'); }
+  if(!img.naturalWidth) throw new Error('the image has no size');
+  return img;
+}
+async function loadFile(file){
+  if(!file) return;
+  if(JOB.active){ log('Engraving in progress','err'); return; }
+  try{ const img=await decodeImage(file); setSource(img,file.name,img.naturalWidth,img.naturalHeight); log(`Loaded ${file.name} (${img.naturalWidth} × ${img.naturalHeight} px)`,'msg'); }
+  catch(e){ $('imgInfo').innerHTML=`<span class="warn">Can't open ${escapeHtml(file.name)}: ${escapeHtml(e.message)}.</span>`; log(`Can't open ${file.name}: ${e.message}`,'err'); }
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function setSource(src,name,sw,sh,place){
+  Object.assign(IMG,{src,name,sw,sh,rot:0}); $('mirror').checked=false;
+  if(place){ $('iw').value=fmt(r1(place.w)); $('ih').value=fmt(r1(place.h)); $('ix').value=fmt(r1(place.x)); $('iy').value=fmt(r1(place.y)); }
+  else { fitSize(40); centerImg(); }
+  scheduleProcess(0);
+}
+function fitSize(target){
+  const L=limits(), mw=L[1]-L[0], mh=L[3]-L[2], a=aspect();
+  let w=Math.min(target,mw), h=w*a; if(h>mh){ h=Math.min(target,mh); w=h/a; }
+  $('iw').value=fmt(r1(w)); $('ih').value=fmt(r1(h));
+}
+function centerImg(){ const L=limits(); $('ix').value=fmt(r1((L[0]+L[1]-(+$('iw').value))/2)); $('iy').value=fmt(r1((L[2]+L[3]-(+$('ih').value))/2)); }
+
+let procTimer=null;
+function scheduleProcess(ms=150){ clearTimeout(procTimer); procTimer=setTimeout(processImage,ms); }
+function updateAdjUI(){
+  const m=$('mode').value;
+  for(const k of ['bright','contrast','gamma','thresh']) $(k+'v').textContent=$(k).value;
+  const t=(m==='threshold'||m==='outline');
+  for(const id of ['threshl','thresh','threshv']) $(id).style.display=t?'':'none';
+  $('threshl').textContent=m==='outline'?'Sensitivity':'Threshold';
+  $('iminbox').style.display=m==='gray'?'':'none';
+}
+function processImage(){
+  updateAdjUI(); saveImgSettings();
+  if(!IMG.src){ IMG.P=null; render(); return; }
+  const lpm=+$('lpm').value, wmm=Math.max(0.5,+$('iw').value||1), hmm=Math.max(0.5,+$('ih').value||1);
+  const w=Math.max(1,Math.round(wmm*lpm)), h=Math.max(1,Math.round(hmm*lpm));
+  const c=document.createElement('canvas'); c.width=w; c.height=h;
+  const g=c.getContext('2d',{willReadFrequently:true});
+  g.fillStyle='#fff'; g.fillRect(0,0,w,h); g.imageSmoothingEnabled=true; g.imageSmoothingQuality='high';
+  g.translate(w/2,h/2); g.rotate(IMG.rot*Math.PI/180); if($('mirror').checked) g.scale(-1,1);
+  const rot=IMG.rot%180!==0, dw=rot?h:w, dh=rot?w:h; g.drawImage(IMG.src,-dw/2,-dh/2,dw,dh);
+  const d=g.getImageData(0,0,w,h).data, n=w*h, v=new Float32Array(n);
+  const br=+$('bright').value/200, ct=+$('contrast').value*2.55, cf=(259*(ct+255))/(255*(259-ct)), gm=+$('gamma').value, inv=$('invert').checked;
+  for(let i=0;i<n;i++){
+    let y=(0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2])/255;   // transparent areas were painted white
+    y=(y-0.5)*cf+0.5+br; y=y<0?0:y>1?1:y; y=Math.pow(y,1/gm); if(inv) y=1-y; v[i]=y;
+  }
+  const mode=$('mode').value, t=+$('thresh').value/100, P=new Float32Array(n);
+  if(mode==='threshold'){ for(let i=0;i<n;i++) P[i]=v[i]<t?1:0; }
+  else if(mode==='gray'){ for(let i=0;i<n;i++){ const b=1-v[i]; P[i]=b<0.03?0:Math.round(b*64)/64; } }
+  else if(mode==='outline'){
+    const th=(1-t)*0.9+0.05;
+    for(let y=1;y<h-1;y++) for(let x=1;x<w-1;x++){ const i=y*w+x;
+      const gx=-v[i-w-1]-2*v[i-1]-v[i+w-1]+v[i-w+1]+2*v[i+1]+v[i+w+1], gy=-v[i-w-1]-2*v[i-w]-v[i-w+1]+v[i+w-1]+2*v[i+w]+v[i+w+1];
+      P[i]=Math.hypot(gx,gy)/4>th?1:0; }
+  } else { // error-diffusion dithering, serpentine scan
+    const e=Float32Array.from(v);
+    const K=mode==='fs' ? [[1,0,7/16],[-1,1,3/16],[0,1,5/16],[1,1,1/16]] : [[1,0,1/8],[2,0,1/8],[-1,1,1/8],[0,1,1/8],[1,1,1/8],[0,2,1/8]];
+    for(let y=0;y<h;y++){ const rev=y&1;
+      for(let k=0;k<w;k++){ const x=rev?w-1-k:k, i=y*w+x, old=e[i], nv=old<0.5?0:1; P[i]=nv?0:1; const err=old-nv;
+        for(const [dx,dy,f] of K){ const xx=x+(rev?-dx:dx), yy=y+dy; if(xx>=0&&xx<w&&yy<h) e[yy*w+xx]+=err*f; } } }
+  }
+  Object.assign(IMG,{P,w,h});
+  // preview: what the burn will look like
+  const pc=$('prev'); pc.width=w; pc.height=h; pc.style.display='block';
+  const pg=pc.getContext('2d'), id=pg.createImageData(w,h);
+  for(let i=0;i<n;i++){ const a=P[i]; id.data[i*4]=255-a*(255-46); id.data[i*4+1]=255-a*(255-30); id.data[i*4+2]=255-a*(255-18); id.data[i*4+3]=255; }
+  pg.putImageData(id,0,0);
+  IMG.job=buildGcode();
+  const x0=+$('ix').value, y0=+$('iy').value;
+  IMG.ok=insideBox(x0,y0,x0+wmm,y0+hmm) && IMG.job.rows>0;
+  const pctMax=Math.min(+$('imax').value,+$('cap').value);
+  $('powNote').textContent=(+$('imax').value>+$('cap').value?`Max power is held to the ${$('cap').value} % power limit (Laser panel). `:'')+`Engraving power: ${mode==='gray'?Math.min(+$('imin').value,pctMax)+'–':''}${pctMax} % (S${Math.round(pctMax/100*M.maxS)}).`;
+  let info=`<b>${escapeHtml(IMG.name)}</b> · ${fmt(wmm)} × ${fmt(hmm)} mm · ${w} × ${h} dots`;
+  if(!insideBox(x0,y0,x0+wmm,y0+hmm)) info+=`<br><span class="warn">Outside the ${MAXTRAVEL} × ${MAXTRAVEL} mm travel box – make it smaller or press Center.</span>`;
+  else if(!IMG.job.rows) info+=`<br><span class="warn">Nothing to burn with these settings – try another mode, threshold or Invert.</span>`;
+  $('imgInfo').innerHTML=info;
+  $('est').textContent=IMG.job.rows?`${IMG.job.rows} lines · ${IMG.job.lines.length.toLocaleString()} commands · about ${fmtTime(IMG.job.secs)} at ${$('ispeed').value} mm/min`:'';
+  render();
+}
+function fmtTime(s){ s=Math.round(s); return s<60?`${s} s`:s<3600?`${Math.floor(s/60)} min ${s%60} s`:`${Math.floor(s/3600)} h ${Math.round(s%3600/60)} min`; }
+
+// Raster G-code: bidirectional rows, M4 dynamic power, run-length segments, laser-off travel (G0),
+// a little overscan with S0 at each row end (clamped to the travel box), blank rows skipped.
+function buildGcode(){
+  const {P,w,h}=IMG, px=1/(+$('lpm').value), x0=+$('ix').value, y0=+$('iy').value;
+  const F=Math.max(10,Math.min(+$('ispeed').value||800, M.maxRate[0])), cap=+$('cap').value;
+  const pmax=Math.min(+$('imax').value,cap), pmin=Math.min(+$('imin').value,pmax);
+  const smax=Math.round(pmax/100*M.maxS), smin=Math.round(pmin/100*M.maxS), gray=$('mode').value==='gray';
+  const L=limits(), ov=Math.max(0.5,F/60*0.06), f=v=>(Math.round(v*1000)/1000).toString();
+  const Sv=p=>p<=0?0:gray?Math.max(1,Math.round(smin+(smax-smin)*p)):smax;
+  const out=['G90 G21','M5','M4 S0'];
+  let fwd=true, g1=0, g0=0, cx=basePos()[0], cy=basePos()[1], rows=0;
+  for(let r=0;r<h;r++){
+    const base=r*w; let a=-1,b=-1;
+    for(let x=0;x<w;x++) if(P[base+x]>0){ if(a<0) a=x; b=x; }
+    if(a<0) continue;
+    rows++;
+    const y=y0+(h-1-r+0.5)*px, xa=x0+a*px, xb=x0+(b+1)*px;
+    const sx=fwd?Math.max(L[0],xa-ov):Math.min(L[1],xb+ov), ex=fwd?Math.min(L[1],xb+ov):Math.max(L[0],xa-ov);
+    out.push(`G0 X${f(sx)} Y${f(y)}`); g0+=Math.hypot(sx-cx,y-cy);
+    out.push(`G1 X${f(fwd?xa:xb)} S0 F${F}`); let sCur=0;
+    if(fwd){ let x=a; while(x<=b){ const s=Sv(P[base+x]); let e=x+1; while(e<=b&&Sv(P[base+e])===s) e++; out.push(`X${f(x0+e*px)}`+(s!==sCur?`S${s}`:'')); sCur=s; x=e; } }
+    else { let x=b; while(x>=a){ const s=Sv(P[base+x]); let e=x-1; while(e>=a&&Sv(P[base+e])===s) e--; out.push(`X${f(x0+(e+1)*px)}`+(s!==sCur?`S${s}`:'')); sCur=s; x=e; } }
+    out.push(`X${f(ex)} S0`);
+    g1+=Math.abs(ex-sx); cx=ex; cy=y; fwd=!fwd;
+  }
+  out.push('M5',`G0 X${f(x0)} Y${f(y0)}`);
+  const rapid=Math.min(M.maxRate[0],M.maxRate[1])||1000;
+  return { lines:out, rows, secs:g1/F*60+g0/rapid*60+rows*0.15 };
+}
+
+// size / placement / adjustment inputs
+$('iw').addEventListener('input',()=>{ if($('lock').checked&&IMG.src) $('ih').value=fmt(r1(+$('iw').value*aspect())); scheduleProcess(); });
+$('ih').addEventListener('input',()=>{ if($('lock').checked&&IMG.src) $('iw').value=fmt(r1(+$('ih').value/aspect())); scheduleProcess(); });
+for(const id of ['ix','iy','lpm','mode','bright','contrast','gamma','thresh','invert','mirror','ispeed','imax','imin']) $(id).addEventListener('input',()=>scheduleProcess(id==='bright'||id==='contrast'||id==='gamma'||id==='thresh'?60:150));
+$('cap').addEventListener('change',()=>scheduleProcess(0));
+$('rotate').onclick=()=>{ if(!IMG.src) return; IMG.rot=(IMG.rot+90)%360; const w=+$('iw').value; $('iw').value=$('ih').value; $('ih').value=fmt(w); scheduleProcess(0); };
+$('resetAdj').onclick=()=>{ $('bright').value=0; $('contrast').value=0; $('gamma').value=1; $('thresh').value=50; $('invert').checked=false; scheduleProcess(0); };
+$('placeHere').onclick=()=>{ const [x,y]=basePos(); $('ix').value=fmt(r1(x)); $('iy').value=fmt(r1(y)); scheduleProcess(0); };
+$('placeCenter').onclick=()=>{ if(IMG.src){ const L=limits(); if(+$('iw').value>L[1]-L[0]||+$('ih').value>L[3]-L[2]) fitSize(Math.min(L[1]-L[0],L[3]-L[2])); } centerImg(); scheduleProcess(0); };
+$('file').onchange=e=>{ loadFile(e.target.files[0]); e.target.value=''; };
+const drop=$('drop');
+['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{ e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{ e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop',e=>loadFile(e.dataTransfer.files[0]));
+window.addEventListener('dragover',e=>e.preventDefault()); window.addEventListener('drop',e=>e.preventDefault());
+document.addEventListener('paste',e=>{
+  if(/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  const it=[...(e.clipboardData?.items||[])].find(i=>i.type.startsWith('image/'));
+  if(it){ e.preventDefault(); const f=it.getAsFile(); loadFile(new File([f],'pasted image.'+(f.type.split('/')[1]||'png'),{type:f.type})); }
+});
+$('sample').onclick=e=>{ e.preventDefault();
+  const c=document.createElement('canvas'); c.width=600; c.height=600; const g=c.getContext('2d');
+  g.fillStyle='#fff'; g.fillRect(0,0,600,600);
+  const gr=g.createLinearGradient(40,0,560,0); gr.addColorStop(0,'#000'); gr.addColorStop(1,'#fff'); g.fillStyle=gr; g.fillRect(40,430,520,110);
+  g.lineWidth=14; g.strokeStyle='#000'; g.beginPath(); g.arc(300,230,170,0,Math.PI*2); g.stroke();
+  g.fillStyle='#000'; g.font='bold 120px -apple-system,Helvetica,sans-serif'; g.textAlign='center'; g.fillText('L1',300,272);
+  setSource(c,'Test image (circle, text, gradient)',600,600);
+};
+
+// ---------------- engraving job (character-counting streaming) ----------------
+// Grbl acknowledges each line with ok/error; keeping up to RX_MAX bytes in flight keeps its
+// planner full so raster rows burn evenly instead of stuttering.
+const JOB={ active:false, lines:null, i:0, acked:0, sent:[], bytes:0, t0:0, paused:false, errors:0, name:'', est:0 };
+const RX_MAX=120;
+function startJob(job,name){
+  if(!laserCmdAllowed()||!canMove()) return;
+  if(M.waiting||M.queue.length){ log('Wait until the previous commands are done','err'); return; }
+  if(M.state!=='Idle'){ log('The engraver must be Idle','err'); return; }
+  Object.assign(JOB,{active:true,lines:job.lines,i:0,acked:0,sent:[],bytes:0,t0:Date.now(),paused:false,errors:0,name,est:job.secs,draining:false,idleSeen:0});
+  M.trail=[];
+  log(`Engraving "${name}": ${job.lines.length} commands, about ${fmtTime(job.secs)}`,'msg');
+  jobPump(); renderJob(); render();
+}
+function jobPump(){
+  while(JOB.active && JOB.i<JOB.lines.length){
+    const l=JOB.lines[JOB.i], n=l.length+1;
+    if(JOB.bytes+n>RX_MAX) break;
+    writeRaw(enc.encode(l+'\n')); JOB.sent.push(n); JOB.bytes+=n; JOB.i++;
+  }
+}
+function jobAck(line){
+  const n=JOB.sent.shift(); if(n) JOB.bytes-=n; JOB.acked++;
+  if(line!=='ok'){ JOB.errors++; const c=+line.slice(6); log(`${line}${ERR[c]?' – '+ERR[c]:''} (line ${JOB.acked})`,'err');
+    if(c===9||JOB.errors>20){ cancelJob(c===9?'engraver locked':'too many errors'); return; } }
+  if(JOB.acked>=JOB.lines.length){ JOB.draining=true; renderJob(); return; }  // finished once the engraver is Idle
+  jobPump();
+}
+function finishJob(){
+  JOB.active=false; JOB.lines=null;
+  log(`Engraving finished in ${fmtTime((Date.now()-JOB.t0)/1000)}${JOB.errors?` with ${JOB.errors} errors`:''}`,'msg');
+  $('jobState').textContent='Done'; renderJob(); render();
+}
+function cancelJob(why){
+  if(!JOB.active) return;
+  JOB.active=false; JOB.lines=null;
+  // feed hold (Grbl switches the laser off in laser mode), then a soft reset once stopped
+  if(M.t){ realtime(0x21); setTimeout(()=>realtime(0x18),350); }
+  flushQueue(); log('Engraving cancelled'+(why?` (${why})`:''),'err');
+  $('jobState').textContent='Cancelled'; renderJob(); render();
+}
+function renderJob(){
+  const box=$('jobbox');
+  if(JOB.active||JOB.t0) box.classList.add('show');
+  if(!JOB.t0) return;
+  const tot=JOB.lines?JOB.lines.length:1, frac=JOB.active?JOB.acked/tot:($('jobState').textContent==='Done'?1:JOB.acked/Math.max(tot,JOB.acked,1));
+  $('jobBar').style.width=(frac*100).toFixed(1)+'%';
+  $('jobTitle').textContent=(JOB.active?'Engraving ':'')+JOB.name;
+  const el=(Date.now()-JOB.t0)/1000;
+  $('jobTime').textContent=JOB.active?`${Math.round(frac*100)} % · ${fmtTime(el)} elapsed · ~${fmtTime(frac>0.02?el/frac-el:JOB.est)} left`:'';
+  $('jobPause').disabled=!JOB.active; $('jobCancel').disabled=!JOB.active;
+  $('jobPause').textContent=JOB.paused?'Resume':'Pause';
+  if(JOB.active) $('jobState').textContent=JOB.paused?'Paused – laser off':JOB.draining?'Finishing the last moves…':'';
+}
+setInterval(()=>{ if(JOB.active) renderJob(); },500);
+$('jobPause').onclick=()=>{ if(!JOB.active) return; JOB.paused=!JOB.paused; realtime(JOB.paused?0x21:0x7e); renderJob(); };
+$('jobCancel').onclick=()=>{ if(confirm('Cancel the engraving?')) cancelJob('by you'); };
+$('imgBurn').onclick=()=>{
+  if(!IMG.P) return; processImage();
+  if(!IMG.ok){ log('Fix the image placement first (it must fit inside the travel box)','err'); return; }
+  const pmax=Math.min(+$('imax').value,+$('cap').value);
+  if(!confirm(`Engrave "${IMG.name}"\n${$('iw').value} × ${$('ih').value} mm at up to ${pmax} % power, about ${fmtTime(IMG.job.secs)}.\n\nGoggles on, nothing flammable around, stay with the engraver.`)) return;
+  startJob(IMG.job,IMG.name);
+};
+$('imgFrame').onclick=()=>{
+  if(!IMG.P||!canMove()) return;
+  const x0=+$('ix').value, y0=+$('iy').value, x1=x0+(+$('iw').value), y1=y0+(+$('ih').value);
+  const pts=[[x0,y0],[x1,y0],[x1,y1],[x0,y1],[x0,y0]];
+  if(!pathInside(pts)) return;
+  send('M5'); for(const p of pts) send(`$J=G90 X${fmt(p[0])} Y${fmt(p[1])} F${speed()}`);
+};
+
+// ---------------- draw your own ----------------
+const PXMM=10;   // drawing canvas: 550 px = 55 mm
+const art=$('art'), ag=art.getContext('2d',{willReadFrequently:true}), over=$('artOver'), og=over.getContext('2d');
+const ART={ tool:'pen', color:'#000000', undo:[], drawing:false, start:null, last:null, grey:null };  // grey: a grey shade or picture was used
+function artMarkGrey(v){ ART.grey=v; try{ localStorage.setItem('laserctl.artgrey',v?'1':'0'); }catch(e){} }
+function artClear(){ ag.fillStyle='#fff'; ag.fillRect(0,0,art.width,art.height); }
+function artSnap(){ ART.undo.push(ag.getImageData(0,0,art.width,art.height)); if(ART.undo.length>40) ART.undo.shift(); }
+function artSave(){ try{ localStorage.setItem('laserctl.art',art.toDataURL('image/png')); }catch(e){} }
+function artLoad(){ artClear(); try{ const g=localStorage.getItem('laserctl.artgrey'); if(g!=null) ART.grey=g==='1'; }catch(e){} try{ const d=localStorage.getItem('laserctl.art'); if(d){ const im=new Image(); im.onload=()=>ag.drawImage(im,0,0); im.src=d; } }catch(e){} }
+function artPt(e){ const r=over.getBoundingClientRect(); return [(e.clientX-r.left)*over.width/r.width,(e.clientY-r.top)*over.height/r.height]; }
+const lw=()=>Math.max(1,+$('artW').value*PXMM);
+function artStyle(g,erase){ g.lineCap='round'; g.lineJoin='round'; g.lineWidth=lw(); g.strokeStyle=erase?'#ffffff':ART.color; g.fillStyle=ART.color; }
+function artShape(g,a,b){
+  const t=ART.tool, fill=$('artFill').checked; g.beginPath();
+  if(t==='line'){ g.moveTo(a[0],a[1]); g.lineTo(b[0],b[1]); g.stroke(); }
+  else if(t==='rect'){ const x=Math.min(a[0],b[0]), y=Math.min(a[1],b[1]), w=Math.abs(b[0]-a[0]), h=Math.abs(b[1]-a[1]); fill?g.fillRect(x,y,w,h):g.strokeRect(x,y,w,h); }
+  else if(t==='ellipse'){ g.ellipse((a[0]+b[0])/2,(a[1]+b[1])/2,Math.abs(b[0]-a[0])/2||0.5,Math.abs(b[1]-a[1])/2||0.5,0,0,Math.PI*2); fill?g.fill():g.stroke(); }
+}
+function artGrid(){
+  og.clearRect(0,0,over.width,over.height);
+  if(!$('artGrid').checked) return;
+  og.lineWidth=1;
+  for(let v=0; v<=art.width; v+=5*PXMM){ og.strokeStyle=v%(25*PXMM)===0?'rgba(37,99,235,.35)':'rgba(37,99,235,.14)';
+    og.beginPath(); og.moveTo(v+.5,0); og.lineTo(v+.5,art.height); og.stroke(); og.beginPath(); og.moveTo(0,v+.5); og.lineTo(art.width,v+.5); og.stroke(); }
+}
+over.addEventListener('pointerdown',e=>{
+  e.preventDefault(); const p=artPt(e);
+  if(ART.tool==='text'){
+    const t=prompt('Text to add:'); if(!t) return;
+    artSnap(); ag.font=`${+$('artFont').value*PXMM}px ${$('artFace').value}`; ag.fillStyle=ART.color; ag.textBaseline='alphabetic';
+    ag.fillText(t,p[0],p[1]); if(ART.color!=='#000000') artMarkGrey(true); else if(ART.grey==null) artMarkGrey(false); artSave(); return;
+  }
+  over.setPointerCapture(e.pointerId); artSnap();
+  if(ART.tool!=='erase' && ART.color!=='#000000') artMarkGrey(true); else if(ART.grey==null) artMarkGrey(false);
+  Object.assign(ART,{drawing:true,start:p,last:p});
+  if(ART.tool==='pen'||ART.tool==='erase'){ const er=ART.tool==='erase'; ag.beginPath(); ag.fillStyle=er?'#ffffff':ART.color; ag.arc(p[0],p[1],lw()/2,0,Math.PI*2); ag.fill(); }
+});
+over.addEventListener('pointermove',e=>{
+  if(!ART.drawing) return; const p=artPt(e);
+  if(ART.tool==='pen'||ART.tool==='erase'){ artStyle(ag,ART.tool==='erase'); ag.beginPath(); ag.moveTo(ART.last[0],ART.last[1]); ag.lineTo(p[0],p[1]); ag.stroke(); ART.last=p; }
+  else { artGrid(); artStyle(og,false); artShape(og,ART.start,p); }
+});
+function artEnd(e){
+  if(!ART.drawing) return; ART.drawing=false;
+  if(ART.tool!=='pen'&&ART.tool!=='erase'){ artStyle(ag,false); artShape(ag,ART.start,e&&e.clientX!=null?artPt(e):ART.last); artGrid(); }
+  artSave();
+}
+over.addEventListener('pointerup',artEnd); over.addEventListener('pointercancel',()=>{ ART.drawing=false; artGrid(); });
+$('tools').onclick=e=>{ const t=e.target.dataset.t; if(!t) return; ART.tool=t; [...$('tools').children].forEach(b=>b.classList.toggle('on',b===e.target)); over.style.cursor=t==='text'?'text':'crosshair'; };
+$('shades').onclick=e=>{ const c=e.target.dataset.c; if(!c) return; ART.color=c; [...$('shades').children].forEach(b=>b.classList.toggle('on',b===e.target)); };
+$('artW').addEventListener('input',()=>$('artWv').textContent=$('artW').value+' mm');
+$('artGrid').onchange=artGrid;
+$('artUndo').onclick=()=>{ const s=ART.undo.pop(); if(s){ ag.putImageData(s,0,0); artSave(); } };
+$('artClear').onclick=()=>{ if(!confirm('Clear the whole drawing?')) return; artSnap(); artClear(); artMarkGrey(null); try{ localStorage.removeItem('laserctl.artgrey'); }catch(e){} artSave(); };
+$('artImg').onclick=()=>$('artFile').click();
+$('artFile').onchange=async e=>{
+  const f=e.target.files[0]; e.target.value=''; if(!f) return;
+  try{ const im=await decodeImage(f); artSnap();
+    const s=Math.min(art.width*0.8/im.naturalWidth, art.height*0.8/im.naturalHeight), w=im.naturalWidth*s, h=im.naturalHeight*s;
+    ag.drawImage(im,(art.width-w)/2,(art.height-h)/2,w,h); artMarkGrey(true); artSave(); }
+  catch(err){ log(`Can't open ${f.name}: ${err.message}`,'err'); }
+};
+$('artUse').onclick=()=>{
+  const W=art.width, H=art.height, d=ag.getImageData(0,0,W,H).data;
+  let x0=W,y0=H,x1=-1,y1=-1, ink=0, mid=0;
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){ const i=(y*W+x)*4, l=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+    if(l<250){ ink++; if(l>70&&l<215) mid++; if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; } }
+  const grey = ART.grey!=null ? ART.grey : mid > ink*0.5;
+  if(x1<0){ log('The drawing is empty','err'); return; }
+  const cw=x1-x0+1, ch=y1-y0+1, c=document.createElement('canvas'); c.width=cw; c.height=ch;
+  c.getContext('2d').drawImage(art,x0,y0,cw,ch,0,0,cw,ch);
+  const L=limits();
+  $('lpm').value='10'; $('mode').value=grey?'gray':'threshold'; $('lock').checked=true;
+  setSource(c,'My drawing',cw,ch,{ w:cw/PXMM, h:ch/PXMM, x:L[0]+x0/PXMM, y:L[2]+(H-1-y1)/PXMM });
+  $('imgCard').scrollIntoView({behavior:'smooth'});
+  log(`Drawing sent to Image engraving (${fmt(r1(cw/PXMM))} × ${fmt(r1(ch/PXMM))} mm, ${grey?'grayscale':'black & white'})`,'msg');
+};
+
+// ---------------- render ----------------
+function render(){
+  const c=!!M.t, st=c?M.state:'Disconnected';
+  const b=$('state'); b.textContent=st; b.className='badge b-'+st.split(':')[0];
+  $('connect').disabled=c; $('demo').disabled=c; $('disconnect').disabled=!c;
+  $('px').textContent=c?M.wpos[0].toFixed(2):'–'; $('py').textContent=c?M.wpos[1].toFixed(2):'–';
+  $('pf').textContent=c?`${Math.round(M.feed)} mm/min · ${M.spindle?Math.round(M.spindle/M.maxS*1000)/10+' %':'off'}`:'–';
+  const armed=M.armed&&c;
+  $('laserCard').classList.toggle('armed',armed);
+  $('fire').disabled=!armed; $('lineBurn').disabled=!armed; $('rectBurn').disabled=!armed; $('burnJog').disabled=!armed;
+  $('fire').classList.toggle('firing',M.laserOn);
+  $('fire').textContent=M.laserOn?'FIRING – release to stop':'Hold to fire (max 3 s)';
+  $('ldot').classList.toggle('on',M.laserOn||M.spindle>0);
+  document.body.classList.toggle('jobbing',JOB.active);
+  if(JOB.active){ $('fire').disabled=true; $('lineBurn').disabled=true; $('rectBurn').disabled=true; }
+  $('imgBurn').disabled=!(armed && IMG.P && !JOB.active && IMG.ok);
+  $('imgFrame').disabled=!(c && IMG.P && !JOB.active && IMG.ok);
+  const Lr=limits();
+  $('limInfo').innerHTML=M.env
+    ? `<span style="color:var(--ok)">●</span> Travel limit ${MAXTRAVEL} × ${MAXTRAVEL} mm, exact (from homing): X ${fmt(Lr[0])} … ${fmt(Lr[1])}, Y ${fmt(Lr[2])} … ${fmt(Lr[3])}`
+    : `<span class="warn">●</span> Travel limit ${MAXTRAVEL} × ${MAXTRAVEL} mm, counted from the work origin (0,0 = bottom-left). <b>Home</b> once to use the engraver's real end stops.`;
+  $('lstate').textContent=(M.laserOn||M.spindle>0)?`LASER ON · ${M.spindle?Math.round(M.spindle/M.maxS*1000)/10:pct()} %`:armed?'Laser off · ARMED':'Laser off · not armed';
+  drawMap();
+}
+
+// ---------------- demo: simulated Grbl ----------------
+function startDemo(){
+  const sim={ pos:[0,0,0], wco:[0,0,0], target:null, feed:0, rapid:false, abs:true, motion:0, spindle:0, spMode:5, S:0, F:300, state:'Idle', q:[], pending:[], jog:false, hold:false, rx:'' };
+  const out=l=>setTimeout(()=>feed(l+'\r\n'),2);
+  const settings={0:10,1:25,10:0,13:0,20:0,21:1,22:1,23:3,24:300,25:500,26:250,27:1,30:1000,31:0,32:1,100:106.66,101:106.66,110:1000,111:1000,120:200,121:100,130:55,131:55};
+  function boot(){ Object.assign(sim,{target:null,q:[],pending:[],state:'Idle',spindle:0,spMode:5,jog:false,hold:false}); out("Grbl 1.1h ['$' for help]"); out('[MSG:Demo simulator – nothing is connected]'); }
+  function exec(line){
+    line=line.trim().toUpperCase();
+    if(line==='$I'){ out('[VER:1.1h.DEMO:]'); out('[MSG:Using machine:DEMO L1 MINI]'); return 'ok'; }
+    if(line==='$$'){ for(const k in settings) out('$'+k+'='+settings[k]); return 'ok'; }
+    if(line==='$X'){ sim.state='Idle'; out('[MSG:Caution: Unlocked]'); return 'ok'; }
+    if(line==='$H'){ sim.state='Home'; sim.q.push({to:[1,1,0],feed:500,home:true}); return null; }
+    if(sim.state==='Alarm') return 'error:9';
+    let jog=false, s=line;
+    if(s.startsWith('$J=')){ jog=true; s=s.slice(3); if(sim.q.length && !sim.q[sim.q.length-1].jog && sim.state==='Run') return 'error:8'; }
+    else if(s.startsWith('$')) return 'error:3';
+    const words=[...s.matchAll(/([A-Z])\s*(-?\d*\.?\d+)/g)].map(m=>[m[1],+m[2]]);
+    let abs=sim.abs, motion=sim.motion, tgt=null, l20=false, F=null;
+    for(const [w,v] of words){
+      if(w==='G'){ if(v===90) abs=true; else if(v===91) abs=false; else if(v===0||v===1) motion=v; else if(v===10) l20=true; }
+      else if(w==='M'){ if(v===3||v===4) sim.spMode=v; if(v===5) sim.spMode=5; }
+      else if(w==='S') sim.S=v; else if(w==='F') F=v;
+      else if(w==='X'||w==='Y'||w==='Z'){ tgt=tgt||{}; tgt[w]=v; }
+    }
+    if(F!=null && (!jog)) sim.F=F;
+    if(l20){ if(tgt){ const base=lastQueuedPos(); if('X' in tgt) sim.wco[0]=base[0]-tgt.X; if('Y' in tgt) sim.wco[1]=base[1]-tgt.Y; } return 'ok'; }
+    if(!jog){ sim.abs=abs; sim.motion=motion; }
+    if(tgt){
+      const base=lastQueuedPos(), to=[...base];
+      ['X','Y','Z'].forEach((a,i)=>{ if(a in tgt) to[i]=abs?tgt[a]+sim.wco[i]:base[i]+tgt[a]; });
+      if(jog && F==null) return 'error:16';
+      const rapid=!jog && motion===0;
+      sim.q.push({to,feed:rapid?1000:(jog?F:sim.F),jog,laser:!jog&&!rapid&&sim.spMode!==5?sim.S:0});
+    }
+    return 'ok';
+  }
+  function lastQueuedPos(){ return sim.q.length?[...sim.q[sim.q.length-1].to]:[...sim.pos]; }
+  // like Grbl's planner: at most 16 moves queued; a line is answered "ok" once it's in the planner
+  function drain(){ while(sim.pending.length && sim.q.length<16 && sim.state!=='Home'){ const r=exec(sim.pending.shift()); if(r) out(r); } }
+  const tick=setInterval(()=>{
+    if(sim.hold){ sim.spindle=0; sim.feed=0; return; }
+    let t=0.05;  // seconds of motion per tick, spread over as many short segments as fit
+    while(t>1e-6 && sim.q.length){
+      const m=sim.q[0];
+      if(sim.state!=='Home') sim.state=m.jog?'Jog':'Run';
+      const d=m.to.map((v,i)=>v-sim.pos[i]), dist=Math.hypot(...d), v=m.feed/60, need=dist/v;
+      sim.feed=m.feed; sim.spindle=m.laser||0;
+      if(need<=t){ sim.pos=[...m.to]; sim.q.shift(); t-=need; if(m.home){ out('ok'); sim.state='Idle'; } }
+      else { sim.pos=sim.pos.map((p,i)=>p+d[i]/dist*v*t); t=0; }
+    }
+    if(!sim.q.length){
+      sim.spindle = sim.spMode===3 && sim.motion===1 ? sim.S : 0;   // stationary laser: M3 in G1 mode
+      if(sim.state==='Run'||sim.state==='Jog'||sim.state==='Home') sim.state='Idle';
+      sim.feed=0;
+    }
+    drain();
+  },50);
+  M.t={
+    write:bytes=>{
+      for(const b of bytes){
+        if(b===0x3f){ const w=sim.pos.map((v,i)=>(v-sim.wco[i]).toFixed(3)); out(`<${sim.hold?'Hold:0':sim.state}|WPos:${w.join(',')}|FS:${Math.round(sim.feed)},${sim.spindle}|WCO:${sim.wco.map(v=>v.toFixed(3)).join(',')}>`); continue; }
+        if(b===0x85){ sim.q=sim.q.filter(m=>!m.jog); if(sim.state==='Jog') sim.state='Idle'; continue; }
+        if(b===0x21){ sim.hold=true; continue; }
+        if(b===0x7e){ sim.hold=false; continue; }
+        if(b===0x18){ const moving=sim.q.length>0&&!sim.hold; sim.hold=false; boot(); if(moving){ sim.state='Alarm'; out('ALARM:3'); } continue; }
+        const ch=String.fromCharCode(b);
+        if(ch==='\n'){ sim.pending.push(sim.rx); sim.rx=''; drain(); } else if(ch!=='\r') sim.rx+=ch;
+      }
+    },
+    close:async()=>clearInterval(tick)
+  };
+  boot();
+  connected('demo simulator');
+}
+
+// ---------------- wire up ----------------
+$('connect').onclick=connectSerial;
+$('demo').onclick=startDemo;
+$('disconnect').onclick=disconnect;
+$('estop').onclick=estop;
+if(!('serial' in navigator)) $('nosupport').classList.add('show');
+loadImgSettings(); updateAdjUI(); artLoad(); artGrid(); updatePower(); updateSpeed(); render();
+log('Ready. Connect the engraver (USB) or try the demo. Press Esc any time to STOP.','msg');
+</script>
+</body></html>
