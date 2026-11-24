@@ -8,12 +8,52 @@ Built and tested with a **THMG L1 MINI** (Grbl 1.1h on an ESP32, CH340 USB, 55 �
 
 ## Use it
 
-Web Serial only works in **Chrome or Edge** (desktop), and only from `https://` or `localhost`. Safari and Firefox don't support it.
+**Live app: https://jorenclaudecode.github.io/laser-control/** — or download this repository and use it offline.
 
-- **Online:** open the GitHub Pages link of this repository in Chrome or Edge.
-- **Locally:** download the repository, then run `python3 -m http.server 8766` in its folder and open http://localhost:8766. On macOS, `./serve.sh` does both and opens Edge.
+### Which way works on your system
 
-Click **Connect engraver** and pick your engraver's serial port. It's usually called "USB Serial" (CH340) or "CP210x". **Demo (simulator)** lets you try everything without an engraver.
+| System | Browser | How to connect |
+|---|---|---|
+| Windows, macOS, Linux, ChromeOS | **Chrome, Edge** | Directly over USB (Web Serial). Just open the live app. |
+| Android | **Chrome** | Directly over USB (WebUSB), using a USB-OTG adapter between phone and engraver. |
+| Windows, macOS, Linux | **Safari, Firefox** | Through the **bridge** on the same computer (below). |
+| iPhone, iPad | any (Safari, Chrome, …) | iOS never lets browsers use USB: plug the engraver into a computer, run the **bridge** with `--lan`, and open the address it prints on the iPhone/iPad (same Wi-Fi). |
+| anything | anything | **Demo (simulator)** works everywhere, without an engraver. |
+
+When you press **Connect engraver**, the page picks the right method by itself. **Other ways…** shows all of them.
+
+### Chrome / Edge on a computer
+
+1. Plug in the engraver and switch it on.
+2. Open the live app and click **Connect engraver**. Pick the port (usually "USB Serial", "CH340" or "CP210x").
+
+- **Windows:** CH340 and CP210x drivers usually install themselves through Windows Update. If no port shows up, install the driver from the chip maker (WCH for CH340, Silicon Labs for CP210x).
+- **Linux:** your user needs access to serial ports: `sudo usermod -aG dialout $USER`, then log out and back in. If the port keeps disappearing, ModemManager may be grabbing it (`sudo systemctl stop ModemManager`).
+- **macOS:** nothing to install.
+
+### Android
+
+1. Connect the engraver to the phone or tablet with a USB-OTG adapter (USB-C → USB-A, or a USB-C cable for USB-C engravers).
+2. Open the live app in Chrome, tap **Connect engraver** and pick the device.
+
+The page contains its own drivers for CH340, CP210x, FTDI and standard USB serial (CDC: ESP32-S2/S3, Arduino, STM32, RP2040).
+
+### Safari, Firefox, iPhone and iPad: the bridge
+
+`bridge.py` is a small program (one file, no installation) for the computer the engraver is plugged into. It serves the app and passes the engraver's USB port through to the browser.
+
+1. Install [Python 3](https://www.python.org/downloads/) if you don't have it (macOS and Linux usually do). **Windows only:** also run `py -m pip install pyserial`.
+2. Download this repository (green **Code** button → *Download ZIP*) and unzip it.
+3. In that folder, run:
+   - `python3 bridge.py`, then open **http://localhost:8766** in any browser on this computer, or
+   - `python3 bridge.py --lan` to also use phones and tablets on the same Wi-Fi. Open the address it prints, e.g. `http://192.168.1.20:8766`.
+
+   On Windows, use `py bridge.py` instead of `python3 bridge.py`. On macOS, `./serve.sh` starts the bridge and opens the page.
+4. Click **Connect engraver (bridge)**.
+
+Other options: `--port COM5` or `--port /dev/ttyUSB0` picks the port yourself, `--list` shows the ports it sees, and `--tcp HOST:PORT` reaches an engraver over the network (experimental, e.g. a Grbl_ESP32 telnet port).
+
+The bridge only opens the engraver while a page is connected, so Chrome/Edge can still use it directly the rest of the time. It allows one page at a time, and it only accepts the page it serves itself, so no other website can reach your laser through it. With `--lan`, anyone on your network can open the controls, so only use it on a network you trust.
 
 ## How it works
 
@@ -41,7 +81,15 @@ Three browser features make a single page enough:
 2. **Canvas.** The browser decodes images (JPG, PNG, SVG and so on) and gives the page every pixel. Turning a picture into burn lines is plain arithmetic in JavaScript.
 3. **No server.** Everything runs in the browser, so the page only has to be delivered once (GitHub Pages just serves the file). Your images and drawings never leave your computer, and a saved copy works offline.
 
-One file is just how it's packaged: about 1,100 lines of HTML, CSS and JavaScript, with no libraries and no build step.
+One file is just how it's packaged: about 1,300 lines of HTML, CSS and JavaScript (plus the optional `bridge.py`), with no libraries and no build step.
+
+### Getting to the USB port
+
+The rest of the page doesn't care how it reaches the engraver: every connection is just "send bytes, receive text lines". There are three ways:
+
+- **Web Serial** (Chrome/Edge on computers): the browser opens the serial port and the operating system's driver handles the USB chip.
+- **WebUSB** (Chrome on Android): Android has no serial driver for web pages, so the page drives the USB chip itself. It sends the same few setup requests (speed 115200, 8 data bits, DTR/RTS off so ESP32 boards don't reset) as the Linux kernel drivers for CH340, CP210x and FTDI, or the standard CDC-ACM requests for boards with native USB.
+- **Bridge** (everything else): `bridge.py` opens the serial port on the computer and relays the bytes over a WebSocket. It uses only the Python standard library (termios) on macOS and Linux, and pyserial on Windows.
 
 ### Talking to Grbl
 
@@ -92,6 +140,7 @@ The drawing canvas is 550 × 550 pixels, which is exactly 55 × 55 mm at 10 pixe
 |---|---|
 | `transport` | `send()` queue (one line, wait for `ok`), `realtime()` single-byte commands, `onLine()` reply parser |
 | `connectSerial()` | Web Serial port picker, read loop, line splitting |
+| `other connections` | bridge detection and WebSocket link, WebUSB with drivers for CH340 / CP210x / FTDI / CDC-ACM |
 | `safety` | `estop()`, `disarm()`, page hide/close handlers |
 | `travel limits` | `limits()`, `clampX/Y()`, homing → travel box |
 | `moving` / `laser` / `shapes` | jogging, hold-to-fire, burn line and rectangle |

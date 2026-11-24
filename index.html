@@ -73,6 +73,7 @@ input[type=range]{width:100%;accent-color:var(--laser)}
 #log .tx{color:var(--acc)} #log .err{color:var(--bad)} #log .msg{color:var(--mut)}
 .banner{border:1px solid var(--bad);color:var(--bad);border-radius:10px;padding:10px 12px;margin-bottom:12px;display:none}
 .banner.show{display:block}
+.banner .k{color:var(--fg)}
 .info{color:var(--mut);font-size:12.5px}
 .k{font-family:ui-monospace,Menlo,monospace;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 4px}
 #imgCard{margin-top:12px}
@@ -109,12 +110,25 @@ hr{border:0;border-top:1px solid var(--line);margin:10px 0}
   <span class="info" id="machine"></span>
   <div class="grow"></div>
   <button class="pri" id="connect">Connect engraver</button>
+  <button id="connMore" aria-expanded="false">Other ways…</button>
   <button id="demo">Demo (simulator)</button>
   <button id="disconnect" disabled>Disconnect</button>
   <button id="estop" title="Esc">STOP</button>
 </header>
 
-<div class="banner" id="nosupport">This browser has no Web Serial. Open this page in <b>Microsoft Edge</b> or <b>Chrome</b> at http://localhost:8766 (Safari can't talk to USB serial devices).</div>
+<div class="banner" id="nosupport"><b>This browser can't open USB devices</b> (Safari, Firefox, and every browser on iPhone and iPad). You can still use the engraver:
+  <ul style="margin:6px 0 0 18px;padding:0">
+    <li>open this page in <b>Chrome</b> or <b>Edge</b> (on Android: Chrome), or</li>
+    <li>run the <b>bridge</b> on the computer the engraver is plugged into, <span class="k">python3 bridge.py</span>, and open <b>http://localhost:8766</b>. For a phone or tablet, run <span class="k">python3 bridge.py --lan</span> and open the address it prints.</li>
+  </ul>
+  <span style="color:var(--mut)">The Demo works in every browser. Instructions: see the README on GitHub.</span></div>
+<section class="card" id="connPanel" hidden style="margin-bottom:12px">
+  <h2>Ways to connect</h2>
+  <div class="row"><button id="cSerial">USB – Web Serial</button><span class="info">Chrome / Edge on Windows, macOS, Linux and ChromeOS</span></div>
+  <div class="row"><button id="cUsb">USB – WebUSB</button><span class="info">Chrome on Android, with a USB-OTG cable. Drivers for CH340, CP210x, FTDI and standard USB serial.</span></div>
+  <div class="row"><input type="text" id="wsUrl" style="flex:1;min-width:200px" spellcheck="false" autocomplete="off"><button id="cNet">Connect to bridge</button></div>
+  <p class="hint" id="connHint">Bridge: for Safari, Firefox, iPhone and iPad. Run <span class="k">python3 bridge.py</span> next to this page's file (see README); the page it serves connects automatically.</p>
+</section>
 <div class="banner" id="alarm"></div>
 
 <div class="grid">
@@ -406,7 +420,7 @@ function parseStatus(line){
 }
 
 async function connectSerial(){
-  if(!('serial' in navigator)){ $('nosupport').classList.add('show'); return; }
+  if(!navigator.serial){ updateConnUI(true); return; }
   let port;
   // common USB-serial chips on Grbl laser boards: CH340/CH9102, CP210x, FTDI, Arduino, ESP32 native USB, STM32 CDC
   const vendors=[0x1a86,0x10c4,0x0403,0x2341,0x303a,0x0483];
@@ -431,6 +445,164 @@ async function connectSerial(){
   port.addEventListener('disconnect',()=>{ if(M.t) lostConnection(); });
   connected('USB');
 }
+// ---------------- other connections: bridge (WebSocket), WebUSB ----------------
+// The browser decides what's possible: Web Serial (Chrome/Edge on computers), WebUSB (Chrome on
+// Android) or neither (Safari, Firefox, iOS) - then the bridge (bridge.py) passes the port through.
+let BRIDGE=null;
+async function detectBridge(){
+  if(location.protocol==='http:'){   // the bridge serves plain http; GitHub Pages (https) never has one
+    try{
+      const c=new AbortController(); setTimeout(()=>c.abort(),1500);
+      const r=await fetch('bridge-info',{cache:'no-store',signal:c.signal});
+      if(r.ok){ const j=await r.json(); if(j&&j.bridge) BRIDGE=j; }
+    }catch(e){}
+  }
+  updateConnUI();
+}
+function bridgeWsUrl(){ const u=new URL('ws',location.href); u.protocol=location.protocol==='https:'?'wss:':'ws:'; return u.href; }
+function updateConnUI(force){
+  const any=BRIDGE||navigator.serial||navigator.usb;
+  $('nosupport').classList.toggle('show',!any||!!force&&!any);
+  const android=/Android/i.test(navigator.userAgent);
+  $('connect').textContent=BRIDGE?'Connect engraver (bridge)':(android&&navigator.usb)||(!navigator.serial&&navigator.usb)?'Connect engraver (USB)':'Connect engraver';
+  $('connect').title=BRIDGE?'Through bridge.py on '+location.host:navigator.serial?'Web Serial':navigator.usb?'WebUSB':'';
+  if(!$('wsUrl').value) $('wsUrl').value=BRIDGE?bridgeWsUrl():'ws://localhost:8766/ws';
+  if(BRIDGE) log('Bridge found on '+location.host+(BRIDGE.port||BRIDGE.tcp?' – engraver: '+(BRIDGE.tcp?'tcp://'+BRIDGE.tcp:BRIDGE.port):' – no engraver plugged in yet'),'msg');
+  else if(!any) log('No USB access in this browser – see the note at the top, or try the Demo.','msg');
+  render();
+}
+async function connectAuto(){
+  if(BRIDGE) return connectBridge();
+  const android=/Android/i.test(navigator.userAgent);
+  if(android && navigator.usb) return connectUsb();   // on Android, USB serial means WebUSB
+  if(navigator.serial) return connectSerial();
+  if(navigator.usb) return connectUsb();
+  updateConnUI(true); $('connPanel').hidden=false;
+  $('nosupport').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function connectBridge(){
+  const info=await fetch('bridge-info',{cache:'no-store'}).then(r=>r.json()).catch(()=>null);
+  if(info){
+    if(info.busy){ log('Another page is already connected to the bridge – close it first','err'); return; }
+    if(!info.tcp && !info.port){ log('The bridge sees no engraver – plug it in, switch it on and try again','err'); return; }
+  }
+  connectNet(bridgeWsUrl());
+}
+function connectNet(url){
+  let ws;
+  try{ ws=new WebSocket(url); }catch(e){ log('Bad bridge address: '+e.message,'err'); return; }
+  ws.binaryType='arraybuffer';
+  const dec=new TextDecoder(); let opened=false;
+  log('Connecting to '+url+' …','msg');
+  ws.onopen=()=>{ opened=true; M.t={ write:b=>{ if(ws.readyState===1) ws.send(b); }, close:async()=>{ ws.onclose=null; try{ ws.close(); }catch(e){} } }; connected('bridge'); };
+  ws.onmessage=e=>feed(typeof e.data==='string'?e.data:dec.decode(new Uint8Array(e.data),{stream:true}));
+  ws.onclose=()=>{
+    if(!opened){ log(`Couldn't connect to ${url}. Is bridge.py running, with the engraver plugged in? Only one page can be connected at a time, and the bridge only accepts the page it serves itself.`,'err'); return; }
+    if(M.t) lostConnection();
+  };
+}
+
+const USB_VENDORS=[0x1a86,0x10c4,0x0403,0x2341,0x303a,0x0483,0x239a,0x2e8a];
+async function connectUsb(){
+  if(!navigator.usb){ log('This browser has no WebUSB','err'); return; }
+  let dev;
+  try{ dev=await navigator.usb.requestDevice({filters:USB_VENDORS.map(v=>({vendorId:v}))}); }
+  catch(e){ log('No USB device chosen.','msg'); return; }
+  try{
+    await dev.open();
+    if(!dev.configuration) await dev.selectConfiguration(1);
+    const drv=usbDriver(dev);
+    await drv.open(115200);
+    let open=true;
+    M.t={ write:b=>drv.write(b).catch(e=>log('USB write failed: '+e.message,'err')),
+          close:async()=>{ open=false; try{ await drv.close(); }catch(e){} try{ await dev.close(); }catch(e){} } };
+    (async()=>{
+      const dec=new TextDecoder();
+      while(open){
+        try{ const d=await drv.read(); if(d&&d.length) feed(dec.decode(d,{stream:true})); }
+        catch(e){ if(open){ open=false; log('USB connection lost: '+e.message,'err'); if(M.t) lostConnection(); } }
+      }
+    })();
+    const onGone=e=>{ if(e.device===dev){ navigator.usb.removeEventListener('disconnect',onGone); if(M.t){ open=false; lostConnection(); } } };
+    navigator.usb.addEventListener('disconnect',onGone);
+    connected('USB · '+drv.name);
+  }catch(e){
+    const busy=/claim|access|busy|unable|security/i.test(e.message||'');
+    log('Could not open the USB device: '+e.message+(busy?' – the operating system\'s own driver is using it. On a computer, use "USB – Web Serial" in Chrome/Edge instead.':''),'err');
+    try{ await dev.close(); }catch(_){}
+  }
+}
+function usbFindEndpoints(dev,pred){
+  for(const itf of dev.configuration.interfaces){
+    const alt=itf.alternate; if(pred&&!pred(alt)) continue;
+    const i=alt.endpoints.find(e=>e.type==='bulk'&&e.direction==='in'), o=alt.endpoints.find(e=>e.type==='bulk'&&e.direction==='out');
+    if(i&&o) return {iface:itf.interfaceNumber, epIn:i.endpointNumber, epOut:o.endpointNumber, size:i.packetSize||64};
+  }
+  throw new Error('no data endpoints on this device');
+}
+// Minimal drivers for the USB-serial chips on Grbl boards (same control requests as the Linux
+// kernel / usb-serial-for-android drivers). DTR and RTS stay off, so ESP32 boards don't reset.
+function usbDriver(dev){
+  const out=(type,recipient,request,value,index,data)=>dev.controlTransferOut({requestType:type,recipient,request,value,index},data);
+  const inq=(type,recipient,request,value,index,len)=>dev.controlTransferIn({requestType:type,recipient,request,value,index},len);
+  const v=dev.vendorId, pid=dev.productId; let ep=null, strip=0;
+  const base={
+    async read(){
+      const r=await dev.transferIn(ep.epIn, ep.size*4);
+      if(r.status==='stall'){ await dev.clearHalt('in',ep.epIn); return null; }
+      let d=new Uint8Array(r.data.buffer,r.data.byteOffset,r.data.byteLength);
+      if(strip){ // FTDI: every USB packet starts with 2 modem-status bytes
+        const parts=[]; for(let k=0;k<d.length;k+=ep.size) parts.push(d.subarray(k+2,Math.min(k+ep.size,d.length)));
+        const n=parts.reduce((a,p)=>a+p.length,0), m=new Uint8Array(n); let o=0; for(const p of parts){ m.set(p,o); o+=p.length; } d=m;
+      }
+      return d;
+    },
+    async write(b){ await dev.transferOut(ep.epOut,b); },
+    async close(){ if(ep) try{ await dev.releaseInterface(ep.iface); }catch(e){} }
+  };
+  if(v===0x1a86 && [0x7523,0x7522,0x5523,0x5512].includes(pid)) return {...base, name:'CH340', async open(baud){
+    ep=usbFindEndpoints(dev); await dev.claimInterface(ep.iface);
+    const div={9600:[0xb202,0x0013],19200:[0xd902,0x000d],38400:[0x6403,0x000a],115200:[0xcc03,0x0008]}[baud];
+    if(!div) throw new Error('unsupported speed '+baud);
+    const setBaud=async()=>{ await out('vendor','device',0x9a,0x1312,div[0]); await out('vendor','device',0x9a,0x0f2c,div[1]); };
+    await inq('vendor','device',0x5f,0,0,8);            // chip version
+    await out('vendor','device',0xa1,0,0);              // init
+    await setBaud();
+    await out('vendor','device',0x9a,0x2518,0x00c3);    // 8N1, RX+TX on
+    await out('vendor','device',0xa1,0x501f,0xd90a);
+    await setBaud();
+    await out('vendor','device',0xa4,0xffff,0);         // DTR and RTS off (inverted bits)
+  }};
+  if(v===0x10c4) return {...base, name:'CP210x', async open(baud){
+    ep=usbFindEndpoints(dev); await dev.claimInterface(ep.iface); const i=ep.iface;
+    await out('vendor','interface',0x00,0x0001,i);                                  // enable
+    await out('vendor','interface',0x1e,0,i,new Uint8Array(new Uint32Array([baud]).buffer)); // baud
+    await out('vendor','interface',0x03,0x0800,i);                                  // 8N1
+    await out('vendor','interface',0x07,0x0300,i);                                  // DTR/RTS off
+  }};
+  if(v===0x0403) return {...base, name:'FTDI', async open(baud){
+    ep=usbFindEndpoints(dev); await dev.claimInterface(ep.iface); strip=1;
+    const idx=dev.configuration.interfaces.length>1?ep.iface+1:0;
+    const d=3000000/baud, whole=Math.floor(d), frac=[0,3,2,4,1,5,6,7][Math.round((d-whole)*8)&7]; // FTDI sub-integer divisor code
+    await out('vendor','device',0x00,0,idx);                                        // reset
+    await out('vendor','device',0x03,(whole&0x3fff)|((frac&3)<<14),idx|((frac>>2)<<8)); // baud
+    await out('vendor','device',0x04,0x0008,idx);                                   // 8N1
+    await out('vendor','device',0x02,0,idx);                                        // no flow control
+    await out('vendor','device',0x01,0x0300,idx);                                   // DTR/RTS low
+  }};
+  // everything else (ESP32-S2/S3 native USB, Arduino, STM32, CH9102, RP2040...): standard CDC-ACM
+  return {...base, name:'USB serial (CDC)', async open(baud){
+    ep=usbFindEndpoints(dev,alt=>alt.interfaceClass===0x0a);
+    const comm=dev.configuration.interfaces.find(i=>i.alternate.interfaceClass===0x02);
+    const ci=comm?comm.interfaceNumber:ep.iface;
+    if(comm) try{ await dev.claimInterface(ci); }catch(e){}
+    await dev.claimInterface(ep.iface);
+    const lc=new Uint8Array(7); new DataView(lc.buffer).setUint32(0,baud,true); lc[6]=8;   // baud, 1 stop, no parity, 8 bits
+    await out('class','interface',0x20,0,ci,lc);
+    await out('class','interface',0x22,0x00,ci);                                    // DTR/RTS off
+  }};
+}
+
 function feed(text){
   rxBuf+=text;
   let i; while((i=rxBuf.search(/\r?\n/))>=0){ const l=rxBuf.slice(0,i); rxBuf=rxBuf.slice(i+(rxBuf[i]==='\r'?2:1)); onLine(l); }
@@ -1026,6 +1198,7 @@ function render(){
   const c=!!M.t, st=c?M.state:'Disconnected';
   const b=$('state'); b.textContent=st; b.className='badge b-'+st.split(':')[0];
   $('connect').disabled=c; $('demo').disabled=c; $('disconnect').disabled=!c;
+  for(const id of ['cSerial','cUsb','cNet']) if(c) $(id).disabled=true; else if(id==='cNet') $(id).disabled=false; else $(id).disabled=!(id==='cSerial'?navigator.serial:navigator.usb);
   $('px').textContent=c?M.wpos[0].toFixed(2):'–'; $('py').textContent=c?M.wpos[1].toFixed(2):'–';
   $('pf').textContent=c?`${Math.round(M.feed)} mm/min · ${M.spindle?Math.round(M.spindle/M.maxS*1000)/10+' %':'off'}`:'–';
   const armed=M.armed&&c;
@@ -1122,11 +1295,16 @@ function startDemo(){
 }
 
 // ---------------- wire up ----------------
-$('connect').onclick=connectSerial;
+$('connect').onclick=connectAuto;
+$('connMore').onclick=()=>{ const p=$('connPanel'); p.hidden=!p.hidden; $('connMore').setAttribute('aria-expanded',String(!p.hidden)); };
+$('cSerial').onclick=connectSerial;
+$('cUsb').onclick=connectUsb;
+$('cNet').onclick=()=>connectNet($('wsUrl').value.trim());
+$('wsUrl').addEventListener('keydown',e=>{ if(e.key==='Enter') $('cNet').click(); });
 $('demo').onclick=startDemo;
 $('disconnect').onclick=disconnect;
 $('estop').onclick=estop;
-if(!('serial' in navigator)) $('nosupport').classList.add('show');
+detectBridge();
 loadImgSettings(); updateAdjUI(); artLoad(); artGrid(); updatePower(); updateSpeed(); render();
 log('Ready. Connect the engraver (USB) or try the demo. Press Esc any time to STOP.','msg');
 </script>

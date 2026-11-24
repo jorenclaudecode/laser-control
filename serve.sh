@@ -1,5 +1,7 @@
 #!/bin/zsh
-# macOS helper: serve Laser Control on http://localhost:8766 (Web Serial needs localhost or https) and open it in Edge.
+# macOS helper: start the bridge (serves the page on http://localhost:8766 and passes the
+# engraver's USB port to any browser) and open the page in Edge. Extra options go to bridge.py,
+# e.g. ./serve.sh --lan
 cd "$(dirname "$0")"
-( sleep 1; open -a "Microsoft Edge" http://localhost:8766 ) &
-exec python3 -m http.server 8766 --bind 127.0.0.1
+( sleep 1; open -a "Microsoft Edge" http://localhost:8766 2>/dev/null || open http://localhost:8766 ) &
+exec python3 bridge.py "$@"
